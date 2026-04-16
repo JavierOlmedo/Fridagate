@@ -89,7 +89,7 @@ fun AboutScreen() {
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "Version 1.0",
+            text = "Version 1.0.1",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

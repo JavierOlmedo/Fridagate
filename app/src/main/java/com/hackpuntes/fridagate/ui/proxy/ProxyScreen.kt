@@ -387,7 +387,7 @@ private fun ProxyLogPanel(
                         items(logs) { line ->
                             Text(
                                 text = line,
-                                color = Color(0xFF00BFFF), // Blue tint for proxy logs (different from Frida green)
+                                color = Color(0xFF00FF00),
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 11.sp,
                                 lineHeight = 16.sp

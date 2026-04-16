@@ -7,8 +7,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.*
@@ -22,6 +25,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.hackpuntes.fridagate.ui.about.AboutScreen
 import com.hackpuntes.fridagate.ui.dashboard.DashboardScreen
+import com.hackpuntes.fridagate.ui.extras.ExtrasScreen
 import com.hackpuntes.fridagate.ui.frida.FridaScreen
 import com.hackpuntes.fridagate.ui.proxy.ProxyScreen
 import com.hackpuntes.fridagate.ui.theme.FridagateTheme
@@ -53,8 +57,12 @@ class MainActivity : ComponentActivity() {
         // setContent replaces the traditional setContentView(R.layout.activity_main)
         // Everything inside this block is Compose UI
         setContent {
-            FridagateTheme {
-                FridagateApp()
+            var isDarkTheme by remember { mutableStateOf(true) }
+            FridagateTheme(darkTheme = isDarkTheme) {
+                FridagateApp(
+                    isDarkTheme    = isDarkTheme,
+                    onToggleTheme  = { isDarkTheme = !isDarkTheme }
+                )
             }
         }
     }
@@ -71,9 +79,10 @@ class MainActivity : ComponentActivity() {
  */
 object Routes {
     const val DASHBOARD = "dashboard"
-    const val FRIDA = "frida"
-    const val PROXY = "proxy"
-    const val ABOUT = "about"
+    const val FRIDA     = "frida"
+    const val PROXY     = "proxy"
+    const val EXTRAS    = "extras"
+    const val ABOUT     = "about"
 }
 
 /**
@@ -106,7 +115,7 @@ data class BottomNavItem(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FridagateApp() {
+fun FridagateApp(isDarkTheme: Boolean = true, onToggleTheme: () -> Unit = {}) {
     // rememberNavController creates a NavController that survives recompositions
     val navController = rememberNavController()
 
@@ -115,6 +124,7 @@ fun FridagateApp() {
         BottomNavItem(Routes.DASHBOARD, "Dashboard", Icons.Default.Home),
         BottomNavItem(Routes.FRIDA,     "Frida",     Icons.Default.Star),
         BottomNavItem(Routes.PROXY,     "Proxy",     Icons.Default.Settings),
+        BottomNavItem(Routes.EXTRAS,    "Extras",    Icons.Default.Build),
         BottomNavItem(Routes.ABOUT,     "About",     Icons.Default.Info)
     )
 
@@ -129,6 +139,15 @@ fun FridagateApp() {
                         text = "Fridagate",
                         style = MaterialTheme.typography.titleLarge
                     )
+                },
+                actions = {
+                    IconButton(onClick = onToggleTheme) {
+                        Icon(
+                            imageVector = if (isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                            contentDescription = if (isDarkTheme) "Switch to light mode" else "Switch to dark mode",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -180,6 +199,7 @@ fun FridagateApp() {
             composable(Routes.DASHBOARD) { DashboardScreen() }
             composable(Routes.FRIDA)     { FridaScreen() }
             composable(Routes.PROXY)     { ProxyScreen() }
+            composable(Routes.EXTRAS)    { ExtrasScreen() }
             composable(Routes.ABOUT)     { AboutScreen() }
         }
     }

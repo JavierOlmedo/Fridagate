@@ -2,6 +2,7 @@ package com.hackpuntes.fridagate.ui.theme
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
@@ -71,12 +72,41 @@ private val HackerColorScheme = darkColorScheme(
     outlineVariant       = SurfaceVariant
 )
 
+private val LightColorScheme = lightColorScheme(
+    primary              = CyanPrimaryDark,
+    onPrimary            = Color.White,
+    primaryContainer     = Color(0xFFE0F7FF),
+    onPrimaryContainer   = CyanPrimaryDark,
+
+    secondary            = BluePrimaryDark,
+    onSecondary          = Color.White,
+    secondaryContainer   = Color(0xFFDDE8FF),
+    onSecondaryContainer = BluePrimaryDark,
+
+    tertiary             = Color(0xFF007A42),
+    onTertiary           = Color.White,
+
+    background           = Color(0xFFF4F6FA),
+    onBackground         = Color(0xFF0D1117),
+
+    surface              = Color.White,
+    onSurface            = Color(0xFF0D1117),
+    surfaceVariant       = Color(0xFFE8EDF5),
+    onSurfaceVariant     = Color(0xFF4A5568),
+
+    error                = RedError,
+    onError              = Color.White,
+    errorContainer       = Color(0xFFFFE8EC),
+    onErrorContainer     = Color(0xFF9B1C34),
+
+    outline              = Color(0xFFCDD5E0),
+    outlineVariant       = Color(0xFFE8EDF5)
+)
+
 @Composable
-fun FridagateTheme(content: @Composable () -> Unit) {
-    // We always use the dark hacker theme — dynamic color and light mode are disabled
-    // Dynamic color (Android 12+) would override our custom palette, so we skip it
+fun FridagateTheme(darkTheme: Boolean = true, content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = HackerColorScheme,
+        colorScheme = if (darkTheme) HackerColorScheme else LightColorScheme,
         typography = Typography,
         content = content
     )

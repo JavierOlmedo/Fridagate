@@ -4,6 +4,7 @@
   <img src="assets/fridagate-banner.png" alt="Fridagate Banner" width="100%"/>
   <p>Android pentesting toolkit - Frida server manager + Burp Suite proxy interceptor</p>
 
+  ![Version](https://img.shields.io/badge/version-1.0.1-brightgreen)
   ![Platform](https://img.shields.io/badge/platform-Android-green)
   ![Min SDK](https://img.shields.io/badge/minSDK-24-blue)
   ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -12,25 +13,28 @@
 
 ## 🔍 What is Fridagate?
 
-Fridagate is an Android application that combines two essential tools for mobile security research into a single, streamlined interface:
+Fridagate is an Android application that combines essential tools for mobile security research into a single, streamlined interface:
 
 - **Frida Server Manager** - download, install, start, stop, and uninstall [frida-server](https://frida.re) directly from the device, with version selection and custom flag support.
 - **Burp Suite Proxy Controller** - configure iptables transparent proxy rules and Android system proxy settings to route all device traffic through [Burp Suite](https://portswigger.net/burp) for interception.
+- **Bypass Injection** *(experimental)* - on-device root detection and SSL pinning bypass using [frida-inject](https://frida.re), no PC required.
 
 Instead of running multiple ADB commands manually before each pentest session, Fridagate lets you set up the entire interception stack in a single tap with the **ACTIVATE ALL** button.
 
 ## 📸 Screenshots
 
 <div align="center">
-  <img src="assets/dashboard.png" width="30%" alt="Dashboard"/>
-  &nbsp;&nbsp;
-  <img src="assets/frida.png" width="30%" alt="Frida"/>
-  &nbsp;&nbsp;
-  <img src="assets/proxy.png" width="30%" alt="Proxy"/>
+  <img src="assets/dashboard.png" width="22%" alt="Dashboard"/>
+  &nbsp;
+  <img src="assets/frida.png" width="22%" alt="Frida"/>
+  &nbsp;
+  <img src="assets/proxy.png" width="22%" alt="Proxy"/>
+  &nbsp;
+  <img src="assets/extra.png" width="22%" alt="Extras"/>
 </div>
 
 <div align="center">
-  <sub>Dashboard &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Frida Server &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Proxy</sub>
+  <sub>Dashboard &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Frida Server &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Proxy &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Extras</sub>
 </div>
 
 ## ✨ Features
@@ -58,6 +62,15 @@ Instead of running multiple ADB commands manually before each pentest session, F
 - One-tap connectivity test to verify Burp is reachable
 - Burp CA certificate installer (required for HTTPS interception)
 - Saves Burp IP and port settings across sessions
+
+### 🧪 Extras *(experimental)*
+
+- **Root Detection Bypass** - hooks `File.exists()`, `Runtime.exec()`, `SystemProperties`, and `PackageManager` to hide root indicators (su binaries, Magisk, SuperSU, build flags)
+- **SSL Pinning Bypass** - bypasses certificate pinning for TrustManager, OkHttp, Conscrypt, HostnameVerifier, and Android Network Security Config
+- App picker dropdown — lists all non-system installed apps
+- Downloads `frida-inject` at the same version as `frida-server` (no PC required)
+- Single **Launch** button spawns the target app with selected scripts injected from the first instruction
+- > ⚠️ Some apps may not be compatible. Report issues at [github.com/JavierOlmedo/Fridagate/issues](https://github.com/JavierOlmedo/Fridagate/issues)
 
 ## 📋 Requirements
 

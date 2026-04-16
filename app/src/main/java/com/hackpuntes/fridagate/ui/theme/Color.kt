@@ -30,5 +30,8 @@ val GreenSuccess      = Color(0xFF00FF88) // "System Online" green
 val RedError          = Color(0xFFFF3B5C) // Error / danger
 val OrangeWarning     = Color(0xFFFFAA00) // Warning
 
+// Terminal log text — shared across all log panels
+val TerminalGreen     = Color(0xFF00FF00)
+
 // Border / divider
 val BorderColor       = Color(0xFF1E2D45) // Subtle border on cards
