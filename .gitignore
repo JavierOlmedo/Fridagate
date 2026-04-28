@@ -47,3 +47,6 @@ keystore/*.p12
 
 # --- OS Specific Files ---
 .DS_Store
+
+# --- Local Planning Notes ---
+PENDING.md

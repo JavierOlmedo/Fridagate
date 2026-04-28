@@ -205,6 +205,12 @@ class DashboardViewModel(context: Context) : ViewModel() {
             _isProxyActive.value = !disabled
             if (disabled) addLog("iptables proxy disabled") else addLog("ERROR: Failed to disable proxy")
 
+            // Step 3: Clear system proxy (http_proxy + global_http_proxy)
+            // Without this, the proxy setting persists across reboots and the WiFi shows "no internet"
+            addLog("Clearing system proxy...")
+            ProxyUtils.clearSystemProxy()
+            addLog("System proxy cleared")
+
             _isBurpReachable.value = false
             addLog("── DONE ──────────────────────────")
             _isLoading.value = false

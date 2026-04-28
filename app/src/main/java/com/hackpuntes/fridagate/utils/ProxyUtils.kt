@@ -175,10 +175,13 @@ object ProxyUtils {
     suspend fun clearSystemProxy(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                // First set to ":0" (standard way to disable proxy)
+                // http_proxy: legacy setting, some Android versions use this
                 RootUtils.executeSuCommand("settings put global http_proxy :0")
-                // Then delete the setting entirely for a clean state
                 RootUtils.executeSuCommand("settings delete global http_proxy")
+                // global_http_proxy: the actual effective system proxy on Android 8+,
+                // persists across reboots — must be cleared or the WiFi "X" stays even after reboot
+                RootUtils.executeSuCommand("settings put global global_http_proxy :0")
+                RootUtils.executeSuCommand("settings delete global global_http_proxy")
                 true
             } catch (e: Exception) {
                 false
