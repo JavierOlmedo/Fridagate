@@ -30,7 +30,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hackpuntes.fridagate.ui.components.AppPicker
 import com.hackpuntes.fridagate.utils.InstalledApps
@@ -39,13 +38,7 @@ import com.hackpuntes.fridagate.utils.ScriptUtils
 @Composable
 fun ExtrasScreen() {
     val context = LocalContext.current
-    val viewModel: ExtrasViewModel = viewModel(
-        factory = object : ViewModelProvider.Factory {
-            @Suppress("UNCHECKED_CAST")
-            override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
-                ExtrasViewModel(context) as T
-        }
-    )
+    val viewModel: ExtrasViewModel = viewModel()
 
     val targetPackage          by viewModel.targetPackage.collectAsState()
     val scripts                by viewModel.scripts.collectAsState()

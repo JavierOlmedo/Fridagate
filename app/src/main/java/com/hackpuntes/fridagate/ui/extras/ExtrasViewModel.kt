@@ -1,8 +1,9 @@
 package com.hackpuntes.fridagate.ui.extras
 
+import android.app.Application
 import android.content.Context
 import android.net.Uri
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hackpuntes.fridagate.data.AppPreferences
 import com.hackpuntes.fridagate.utils.FridaInjectUtils
@@ -18,7 +19,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class ExtrasViewModel(private val context: Context) : ViewModel() {
+class ExtrasViewModel(application: Application) : AndroidViewModel(application) {
+
+    // The application context: an Activity kept here would leak on every rotation
+    private val context: Context get() = getApplication()
 
     /** Built-in scripts followed by the imported ones */
     private val _scripts = MutableStateFlow(ScriptUtils.SCRIPTS)
