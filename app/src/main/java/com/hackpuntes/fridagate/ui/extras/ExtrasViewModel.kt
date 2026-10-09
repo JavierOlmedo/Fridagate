@@ -1,6 +1,7 @@
 package com.hackpuntes.fridagate.ui.extras
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hackpuntes.fridagate.utils.FridaInjectUtils
@@ -14,10 +15,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class ExtrasViewModel(private val context: Context) : ViewModel() {
 
-    val scripts: List<BypassScript> = ScriptUtils.SCRIPTS
+    /** Built-in scripts followed by the imported ones */
+    private val _scripts = MutableStateFlow(ScriptUtils.SCRIPTS)
+    val scripts: StateFlow<List<BypassScript>> = _scripts.asStateFlow()
 
     // -------------------------------------------------------------------------
     // UI State
@@ -30,7 +34,7 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
     val installedApps: StateFlow<List<InstalledApps.AppInfo>> = _installedApps.asStateFlow()
 
     /** IDs of scripts currently toggled ON */
-    private val _enabledScripts = MutableStateFlow(setOf(scripts.first().id))
+    private val _enabledScripts = MutableStateFlow(setOf(ScriptUtils.SCRIPTS.first().id))
     val enabledScripts: StateFlow<Set<String>> = _enabledScripts.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
@@ -55,6 +59,7 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
     init {
         checkEnvironment()
         loadInstalledApps()
+        viewModelScope.launch { reloadScripts() }
     }
 
     // -------------------------------------------------------------------------
@@ -70,6 +75,32 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
             if (current.size > 1) current - id else current   // keep at least one
         } else {
             current + id
+        }
+    }
+
+    /** Copies a .js picked by the user into the app and enables it */
+    fun importScript(uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { ScriptUtils.importScript(context, uri) } }
+            result.onSuccess { script ->
+                reloadScripts()
+                _enabledScripts.value = _enabledScripts.value + script.id
+                addLog("Imported ${script.name} — enabled")
+            }.onFailure {
+                addLog("ERROR: Could not import the script: ${it.message}")
+            }
+        }
+    }
+
+    /** Deletes an imported script. Keeps at least one script enabled. */
+    fun deleteScript(script: BypassScript) {
+        if (!script.isCustom) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { ScriptUtils.deleteCustomScript(script) }
+            reloadScripts()
+            val remaining = _enabledScripts.value - script.id
+            _enabledScripts.value = remaining.ifEmpty { setOf(ScriptUtils.SCRIPTS.first().id) }
+            addLog("Deleted ${script.name}")
         }
     }
 
@@ -114,7 +145,7 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
             addLog("ERROR: frida-inject not installed — tap Download first")
             return
         }
-        val active = scripts.filter { _enabledScripts.value.contains(it.id) }
+        val active = _scripts.value.filter { _enabledScripts.value.contains(it.id) }
 
         viewModelScope.launch {
             _isLoading.value = true
@@ -161,6 +192,10 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
             }
             _isLoading.value = false
         }
+    }
+
+    private suspend fun reloadScripts() {
+        _scripts.value = ScriptUtils.SCRIPTS + withContext(Dispatchers.IO) { ScriptUtils.listCustomScripts(context) }
     }
 
     private fun addLog(message: String) {

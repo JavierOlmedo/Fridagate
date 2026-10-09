@@ -1,5 +1,7 @@
 package com.hackpuntes.fridagate.ui.extras
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -9,7 +11,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -44,7 +48,13 @@ fun ExtrasScreen() {
     )
 
     val targetPackage          by viewModel.targetPackage.collectAsState()
+    val scripts                by viewModel.scripts.collectAsState()
     val enabledScripts         by viewModel.enabledScripts.collectAsState()
+
+    // System file picker; any type, since .js files rarely carry a JavaScript MIME type
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) viewModel.importScript(uri)
+    }
     val isLoading              by viewModel.isLoading.collectAsState()
     val logs                   by viewModel.logs.collectAsState()
     val isFridaRunning         by viewModel.isFridaRunning.collectAsState()
@@ -137,11 +147,13 @@ fun ExtrasScreen() {
 
             // ── Script toggles ─────────────────────────────────────────────────
             ScriptsCard(
-                scripts        = viewModel.scripts,
+                scripts        = scripts,
                 enabledScripts = enabledScripts,
                 isLoading      = isLoading,
                 context        = context,
-                onToggle       = { viewModel.toggleScript(it) }
+                onToggle       = { viewModel.toggleScript(it) },
+                onImport       = { importLauncher.launch(arrayOf("*/*")) },
+                onDelete       = { viewModel.deleteScript(it) }
             )
 
             // ── Single Launch button ───────────────────────────────────────────
@@ -257,7 +269,7 @@ private fun TargetPackageCard(
 }
 
 /**
- * One card with two toggle rows (one per script) and an expandable JS viewer per script.
+ * One card with a toggle row per script (built-in and imported) and an expandable JS viewer.
  */
 @Composable
 private fun ScriptsCard(
@@ -265,11 +277,24 @@ private fun ScriptsCard(
     enabledScripts: Set<String>,
     isLoading: Boolean,
     context: android.content.Context,
-    onToggle: (String) -> Unit
+    onToggle: (String) -> Unit,
+    onImport: () -> Unit,
+    onDelete: (ScriptUtils.BypassScript) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text("Scripts", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Scripts", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                TextButton(onClick = onImport, enabled = !isLoading) {
+                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Import .js")
+                }
+            }
             Spacer(modifier = Modifier.height(4.dp))
 
             scripts.forEachIndexed { index, script ->
@@ -279,7 +304,8 @@ private fun ScriptsCard(
                     enabled   = enabledScripts.contains(script.id),
                     isLoading = isLoading,
                     context   = context,
-                    onToggle  = { onToggle(script.id) }
+                    onToggle  = { onToggle(script.id) },
+                    onDelete  = { onDelete(script) }
                 )
             }
         }
@@ -292,7 +318,8 @@ private fun ScriptRow(
     enabled: Boolean,
     isLoading: Boolean,
     context: android.content.Context,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    onDelete: () -> Unit
 ) {
     var showSource by remember { mutableStateOf(false) }
     val source by remember(showSource) {
@@ -311,6 +338,11 @@ private fun ScriptRow(
                 Text(script.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Spacer(modifier = Modifier.width(8.dp))
+            if (script.isCustom) {
+                IconButton(onClick = onDelete, enabled = !isLoading) {
+                    Icon(Icons.Default.Delete, contentDescription = "Delete ${script.name}")
+                }
+            }
             Switch(checked = enabled, onCheckedChange = { onToggle() }, enabled = !isLoading)
         }
 
