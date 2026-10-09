@@ -54,6 +54,8 @@ android {
 }
 
 dependencies {
+    // Versions live in gradle/libs.versions.toml
+
     // --- Core Android ---
     // Basic Kotlin extensions for Android (adds useful shortcuts)
     implementation(libs.androidx.core.ktx)
@@ -72,38 +74,38 @@ dependencies {
     implementation(libs.androidx.compose.material3)      // Material Design 3 components
 
     // Material Icons Extended: includes ALL Material icons (Refresh, KeyboardArrowDown, etc.)
-    // This already contains material-icons-core, so we only need this one dependency
-    implementation("androidx.compose.material:material-icons-extended")
+    // R8 removes the ones the app doesn't use from release builds
+    implementation(libs.androidx.compose.material.icons.extended)
 
     // --- Navigation ---
     // Handles navigation between screens (tabs) in Compose
-    implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation(libs.androidx.navigation.compose)
 
     // --- ViewModel ---
     // ViewModel survives screen rotations and holds UI state
     // The -compose variant adds special Compose integration
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
 
     // --- Coroutines ---
     // Allows running async code (network, file I/O) without blocking the UI thread
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation(libs.kotlinx.coroutines.android)
 
     // --- Networking ---
     // OkHttp: HTTP client used to download files and call APIs
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(libs.okhttp)
 
     // --- JSON Parsing ---
     // Gson: converts JSON strings into Kotlin data classes and vice versa
-    implementation("com.google.code.gson:gson:2.10.1")
+    implementation(libs.gson)
 
     // --- Compression ---
     // XZ: decompresses .xz files (Frida server binaries are distributed as .xz)
-    implementation("org.tukaani:xz:1.9")
+    implementation(libs.xz)
 
     // --- Persistent Storage ---
     // DataStore: modern replacement for SharedPreferences
     // Used to save user settings (Burp IP, port, etc.) across app restarts
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation(libs.androidx.datastore.preferences)
 
     // --- Testing ---
     testImplementation(libs.junit)

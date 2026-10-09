@@ -134,7 +134,7 @@ object FridaUtils {
                     }
 
                     // JsonReader streams the JSON array one element at a time
-                    JsonReader(response.body?.charStream() ?: return@withContext emptyList()).use { reader ->
+                    JsonReader(response.body.charStream()).use { reader ->
                         reader.beginArray() // The response is a JSON array [...]
 
                         while (reader.hasNext()) {
@@ -314,7 +314,7 @@ object FridaUtils {
                 client.newCall(downloadRequest).execute().use { response ->
                     if (!response.isSuccessful) return@withContext null
 
-                    response.body?.let { body ->
+                    response.body.let { body ->
                         when {
                             // --- Handle .xz compressed files ---
                             url.endsWith(".xz") -> {

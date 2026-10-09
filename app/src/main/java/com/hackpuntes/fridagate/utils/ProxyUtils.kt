@@ -362,8 +362,7 @@ object ProxyUtils {
                 .build()
             val request = Request.Builder().url("http://$burpIp:$burpPort/cert").build()
             client.newCall(request).execute().use { response ->
-                val body = response.body
-                if (!response.isSuccessful || body == null) null else CertUtils.parse(body.bytes())
+                if (!response.isSuccessful) null else CertUtils.parse(response.body.bytes())
             }
         } catch (e: Exception) {
             null
