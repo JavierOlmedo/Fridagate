@@ -1,21 +1,13 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# R8 rules for Fridagate release builds.
+# R8 shrinks, optimizes and renames code. Anything read by reflection must be kept here.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Gson builds these classes by reflection when it parses the GitHub releases API
+# (FridaUtils). Keep them, their fields and the generic signature of List<GithubAsset>,
+# otherwise the Frida version list comes back empty in release builds.
+-keepattributes Signature, RuntimeVisibleAnnotations, AnnotationDefault
+-keep class com.hackpuntes.fridagate.utils.FridaUtils$GithubRelease { *; }
+-keep class com.hackpuntes.fridagate.utils.FridaUtils$GithubAsset { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep file names and line numbers so crash stack traces stay readable
+# (they can be decoded with the mapping.txt of each build).
+-keepattributes SourceFile, LineNumberTable
