@@ -122,8 +122,9 @@ fun AboutScreen(viewModel: AboutViewModel = viewModel()) {
                 )
                 Text(
                     text = "Fridagate is an open source Android pentesting toolkit that combines " +
-                            "Frida server management and Burp Suite proxy configuration into a " +
-                            "single app. Designed to simplify mobile security research workflows.",
+                            "Frida server management and proxy setup for Burp Suite, Caido and " +
+                            "mitmproxy into a single app. Designed to simplify mobile security " +
+                            "research workflows.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Start

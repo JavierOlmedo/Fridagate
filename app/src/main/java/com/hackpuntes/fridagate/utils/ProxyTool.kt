@@ -18,7 +18,8 @@ enum class ProxyTool(
     ),
     CAIDO(
         label = "Caido",
-        transparentHint = "Enable invisible proxying on the Caido listener (--invisible in the CLI)."
+        transparentHint = "Caido needs invisible proxying: on by default in the desktop app, " +
+            "--invisible for the CLI."
     ),
     MITMPROXY(
         label = "mitmproxy",
