@@ -105,9 +105,10 @@ class DashboardViewModel(context: Context) : ViewModel() {
             _isRootAvailable.value = root
 
             // Check Frida
-            val fridaInstalled = FridaUtils.isFridaServerInstalled()
+            val fridaConfig = prefs.fridaServerConfig()
+            val fridaInstalled = FridaUtils.isFridaServerInstalled(fridaConfig)
             _isFridaInstalled.value = fridaInstalled
-            val fridaRunning = if (fridaInstalled) FridaUtils.isFridaServerRunning() else false
+            val fridaRunning = if (fridaInstalled) FridaUtils.isFridaServerRunning(fridaConfig) else false
             _isFridaRunning.value = fridaRunning
 
             // Check proxy
@@ -151,7 +152,7 @@ class DashboardViewModel(context: Context) : ViewModel() {
                 addLog("Frida server already running — skipping")
             } else {
                 addLog("Starting frida-server...")
-                val started = FridaUtils.startFridaServer()
+                val started = FridaUtils.startFridaServer(prefs.fridaServerConfig())
                 _isFridaRunning.value = started
                 if (started) addLog("Frida server started") else addLog("ERROR: Failed to start frida-server")
             }
@@ -207,7 +208,7 @@ class DashboardViewModel(context: Context) : ViewModel() {
             // Step 1: Stop frida-server
             if (_isFridaRunning.value) {
                 addLog("Stopping frida-server...")
-                val stopped = FridaUtils.stopFridaServer()
+                val stopped = FridaUtils.stopFridaServer(prefs.fridaServerConfig())
                 _isFridaRunning.value = !stopped
                 if (stopped) addLog("Frida server stopped") else addLog("ERROR: Failed to stop frida-server")
             } else {

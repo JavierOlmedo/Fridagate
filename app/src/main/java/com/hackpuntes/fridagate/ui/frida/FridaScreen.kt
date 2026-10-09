@@ -7,10 +7,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,9 +21,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hackpuntes.fridagate.utils.FridaServerConfig
 import com.hackpuntes.fridagate.utils.FridaUtils
 
 /**
@@ -55,6 +59,7 @@ fun FridaScreen(
     val isRootAvailable by viewModel.isRootAvailable.collectAsState()
     val logs by viewModel.logs.collectAsState()
     val lastCustomFlags by viewModel.lastCustomFlags.collectAsState()
+    val serverConfig by viewModel.serverConfig.collectAsState()
 
     // Context is needed for operations that require it (e.g., file download)
     val context = LocalContext.current
@@ -84,7 +89,16 @@ fun FridaScreen(
                 isInstalled = isInstalled,
                 isRunning = isRunning,
                 installedVersion = installedVersion,
-                activeFlags = lastCustomFlags
+                activeFlags = lastCustomFlags,
+                config = serverConfig
+            )
+
+            // ── Section: Stealth ──────────────────────────────────────────────
+            // Binary name and port, to get past apps that look for frida-server
+            StealthCard(
+                config = serverConfig,
+                enabled = !isLoading,
+                onApply = { name, port -> viewModel.applyServerSettings(name, port) }
             )
 
             // ── Section: Version Selector ─────────────────────────────────────
@@ -195,7 +209,8 @@ private fun StatusCard(
     isInstalled: Boolean,
     isRunning: Boolean,
     installedVersion: String,
-    activeFlags: String
+    activeFlags: String,
+    config: FridaServerConfig
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -209,6 +224,8 @@ private fun StatusCard(
             StatusRow(label = "Installed", value = if (isInstalled) "Yes" else "No", isActive = isInstalled)
             StatusRow(label = "Running",   value = if (isRunning) "Yes" else "No",   isActive = isRunning)
             StatusRow(label = "Version",   value = installedVersion, isActive = installedVersion != "Not installed")
+            InfoRow(label = "Binary", value = config.binaryPath)
+            InfoRow(label = "Port", value = config.port.toString())
 
             // Show active flags only when the server is running
             if (isRunning) {
@@ -242,6 +259,86 @@ private fun StatusRow(label: String, value: String, isActive: Boolean) {
             // Green when active, red when inactive
             color = if (isActive) Color(0xFF4CAF50) else Color(0xFFF44336)
         )
+    }
+}
+
+/** A label and a neutral value, for settings rather than states */
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, style = MaterialTheme.typography.bodyMedium)
+        Text(text = value, fontWeight = FontWeight.Medium, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+    }
+}
+
+/**
+ * Binary name and listen port of frida-server.
+ * Apps that scan for a "frida-server" process or probe port 27042 won't find it.
+ */
+@Composable
+private fun StealthCard(
+    config: FridaServerConfig,
+    enabled: Boolean,
+    onApply: (name: String, port: String) -> Unit
+) {
+    var name by remember(config.name) { mutableStateOf(config.name) }
+    var port by remember(config.port) { mutableStateOf(config.port.toString()) }
+    val changed = name != config.name || port != config.port.toString()
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "Stealth",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = "Apps that look for a process called frida-server or for port 27042 won't find it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.trim().take(15) },
+                    label = { Text("Binary name") },
+                    singleLine = true,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = { name = FridaServerConfig.randomName() }, enabled = enabled) {
+                    Icon(Icons.Default.Shuffle, contentDescription = "Random name")
+                }
+            }
+            OutlinedTextField(
+                value = port,
+                onValueChange = { port = it.filter(Char::isDigit).take(5) },
+                label = { Text("Port") },
+                singleLine = true,
+                enabled = enabled,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
+            )
+            if (port != FridaServerConfig.DEFAULT_PORT.toString()) {
+                Text(
+                    text = "frida -U only reaches port 27042. Run adb forward tcp:27042 tcp:$port, " +
+                            "then frida -H 127.0.0.1:27042.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Button(
+                onClick = { onApply(name, port) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = enabled && changed
+            ) { Text("Apply") }
+        }
     }
 }
 

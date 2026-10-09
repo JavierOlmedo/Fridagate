@@ -1,9 +1,13 @@
 package com.hackpuntes.fridagate.ui.frida
 
+import android.app.Application
 import android.content.Context
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.hackpuntes.fridagate.data.AppPreferences
+import com.hackpuntes.fridagate.utils.FridaServerConfig
 import com.hackpuntes.fridagate.utils.FridaUtils
+import com.hackpuntes.fridagate.utils.InputValidator
 import com.hackpuntes.fridagate.utils.FridaUtils.FridaRelease
 import com.hackpuntes.fridagate.utils.RootUtils
 import com.hackpuntes.fridagate.utils.ShellUtils
@@ -31,7 +35,14 @@ import kotlinx.coroutines.launch
  *  StateFlow always has a current value (unlike LiveData which can be null initially).
  *  Compose collects StateFlow with "collectAsState()" in the composable.
  */
-class FridaViewModel : ViewModel() {
+class FridaViewModel(application: Application) : AndroidViewModel(application) {
+
+    // Saved settings: frida-server binary name and port
+    private val prefs = AppPreferences(application)
+
+    /** Binary name and port frida-server is installed and started with */
+    private val _serverConfig = MutableStateFlow(FridaServerConfig())
+    val serverConfig: StateFlow<FridaServerConfig> = _serverConfig.asStateFlow()
 
     // -------------------------------------------------------------------------
     // UI State — each property below is a piece of state that the UI observes.
@@ -124,7 +135,8 @@ class FridaViewModel : ViewModel() {
             addLog("Root access available")
 
             // Check if frida-server binary exists
-            val isInstalled = FridaUtils.isFridaServerInstalled()
+            val config = config()
+            val isInstalled = FridaUtils.isFridaServerInstalled(config)
             _isServerInstalled.value = isInstalled
 
             if (isInstalled) {
@@ -133,7 +145,7 @@ class FridaViewModel : ViewModel() {
                 _installedVersion.value = version ?: "Unknown"
 
                 // Check if the process is currently running
-                val isRunning = FridaUtils.isFridaServerRunning()
+                val isRunning = FridaUtils.isFridaServerRunning(config)
                 _isServerRunning.value = isRunning
 
                 val statusText = if (isRunning) "running" else "stopped"
@@ -244,7 +256,7 @@ class FridaViewModel : ViewModel() {
             addLog("Installing frida-server to /data/local/tmp/...")
 
             // Step 4: Install via root
-            val installed = FridaUtils.installFridaServer(fridaFile, version)
+            val installed = FridaUtils.installFridaServer(fridaFile, version, config())
 
             if (installed) {
                 _isServerInstalled.value = true
@@ -267,7 +279,7 @@ class FridaViewModel : ViewModel() {
             _isLoading.value = true
             addLog("Starting frida-server...")
 
-            val started = FridaUtils.startFridaServer()
+            val started = FridaUtils.startFridaServer(config())
 
             if (started) {
                 _isServerRunning.value = true
@@ -303,7 +315,7 @@ class FridaViewModel : ViewModel() {
             _isLoading.value = true
             addLog("Starting frida-server with flags: $trimmed")
 
-            val started = FridaUtils.startFridaServerWithFlags(trimmed)
+            val started = FridaUtils.startFridaServerWithFlags(trimmed, config())
 
             if (started) {
                 _isServerRunning.value = true
@@ -322,7 +334,7 @@ class FridaViewModel : ViewModel() {
             _isLoading.value = true
             addLog("Stopping frida-server...")
 
-            val stopped = FridaUtils.stopFridaServer()
+            val stopped = FridaUtils.stopFridaServer(config())
 
             if (stopped) {
                 _isServerRunning.value = false
@@ -341,7 +353,7 @@ class FridaViewModel : ViewModel() {
             _isLoading.value = true
             addLog("Uninstalling frida-server...")
 
-            val uninstalled = FridaUtils.uninstallFridaServer()
+            val uninstalled = FridaUtils.uninstallFridaServer(config())
 
             if (uninstalled) {
                 _isServerInstalled.value = false
@@ -355,6 +367,58 @@ class FridaViewModel : ViewModel() {
             _isLoading.value = false
         }
     }
+
+    /**
+     * Saves a new binary name and port for frida-server.
+     * If it is installed under the old name, the binary is renamed (stopping it first).
+     *
+     * @param name     New binary / process name
+     * @param portText New listen port, as typed by the user
+     */
+    fun applyServerSettings(name: String, portText: String) {
+        val newName = name.trim()
+        val port = portText.trim().toIntOrNull()
+        if (!FridaServerConfig.isValidName(newName)) {
+            addLog("ERROR: Invalid name — up to 15 letters, digits, '.', '-' or '_'")
+            return
+        }
+        if (port == null || !InputValidator.isValidPort(port)) {
+            addLog("ERROR: Invalid port — use a number between 1 and 65535")
+            return
+        }
+        viewModelScope.launch {
+            _isLoading.value = true
+            val old = config()
+            val new = FridaServerConfig(newName, port)
+            val wasRunning = FridaUtils.isFridaServerRunning(old)
+
+            if (old.name != new.name && FridaUtils.isFridaServerInstalled(old)) {
+                val error = FridaUtils.renameFridaServer(old, new)
+                if (error != null) {
+                    addLog("ERROR: Could not rename the binary: $error")
+                    _isLoading.value = false
+                    return@launch
+                }
+                addLog("Binary renamed: ${old.binaryPath} → ${new.binaryPath}")
+            }
+
+            prefs.saveFridaServerConfig(new)
+            _serverConfig.value = new
+            addLog("frida-server settings: name ${new.name}, port ${new.port}")
+            if (!new.isDefaultPort) {
+                addLog("frida -U only reaches port 27042: run adb forward tcp:27042 tcp:${new.port}, then frida -H 127.0.0.1:27042")
+            }
+            if (wasRunning) addLog("Start frida-server again to use the new settings")
+
+            _isServerRunning.value = FridaUtils.isFridaServerRunning(new)
+            _isServerInstalled.value = FridaUtils.isFridaServerInstalled(new)
+            _isLoading.value = false
+        }
+    }
+
+    /** Reads the saved binary name and port, and publishes them to the UI */
+    private suspend fun config(): FridaServerConfig =
+        prefs.fridaServerConfig().also { _serverConfig.value = it }
 
     /** Clears all log entries from the log panel */
     fun clearLogs() {

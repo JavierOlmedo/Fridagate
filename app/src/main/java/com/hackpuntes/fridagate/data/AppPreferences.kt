@@ -8,7 +8,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.hackpuntes.fridagate.utils.FridaServerConfig
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 /**
@@ -63,6 +65,8 @@ class AppPreferences(private val context: Context) {
         val PROXY_TOOL = stringPreferencesKey("proxy_tool")
         val CA_HASH = stringPreferencesKey("ca_hash")
         val CA_REINSTALL_ON_BOOT = booleanPreferencesKey("ca_reinstall_on_boot")
+        val FRIDA_SERVER_NAME = stringPreferencesKey("frida_server_name")
+        val FRIDA_SERVER_PORT = intPreferencesKey("frida_server_port")
     }
 
     // -------------------------------------------------------------------------
@@ -188,6 +192,26 @@ class AppPreferences(private val context: Context) {
 
     suspend fun saveCaReinstallOnBoot(enabled: Boolean) {
         context.dataStore.edit { preferences -> preferences[Keys.CA_REINSTALL_ON_BOOT] = enabled }
+    }
+
+    // -------------------------------------------------------------------------
+    // frida-server binary name and port
+    // -------------------------------------------------------------------------
+
+    /** Binary name and port of frida-server (defaults: frida-server, 27042) */
+    suspend fun fridaServerConfig(): FridaServerConfig {
+        val preferences = context.dataStore.data.first()
+        return FridaServerConfig(
+            name = preferences[Keys.FRIDA_SERVER_NAME] ?: FridaServerConfig.DEFAULT_NAME,
+            port = preferences[Keys.FRIDA_SERVER_PORT] ?: FridaServerConfig.DEFAULT_PORT
+        )
+    }
+
+    suspend fun saveFridaServerConfig(config: FridaServerConfig) {
+        context.dataStore.edit { preferences ->
+            preferences[Keys.FRIDA_SERVER_NAME] = config.name
+            preferences[Keys.FRIDA_SERVER_PORT] = config.port
+        }
     }
 
     // -------------------------------------------------------------------------

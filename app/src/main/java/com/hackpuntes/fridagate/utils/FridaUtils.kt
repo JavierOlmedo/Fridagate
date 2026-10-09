@@ -36,9 +36,8 @@ import java.util.zip.ZipInputStream
  */
 object FridaUtils {
 
-    // Path where the frida-server binary will be installed on the device
-    // /data/local/tmp/ is writable by root on all Android versions
-    const val FRIDA_BINARY_PATH = "/data/local/tmp/frida-server"
+    // The binary goes to /data/local/tmp/<name> (see FridaServerConfig): writable by
+    // root on every Android version. Name and port are configurable.
 
     // Path where we store the installed version number as a plain text file
     // This lets us display which version is installed without running frida-server
@@ -401,7 +400,7 @@ object FridaUtils {
     }
 
     /**
-     * Installs the Frida server binary to /data/local/tmp/ using root commands.
+     * Installs the Frida server binary to /data/local/tmp/<name> using root commands.
      *
      * Steps:
      *  1. Copy the file from our app's private directory to /data/local/tmp/
@@ -411,17 +410,17 @@ object FridaUtils {
      *
      * @param fridaFile The downloaded binary file (in the app's private directory)
      * @param version The version string to save (e.g., "16.7.0")
+     * @param config Binary name to install it under
      * @return true if installation was successful
      */
-    suspend fun installFridaServer(fridaFile: File, version: String): Boolean {
+    suspend fun installFridaServer(fridaFile: File, version: String, config: FridaServerConfig): Boolean {
         return withContext(Dispatchers.IO) {
-            val copy = RootUtils.exec(
-                "cp ${ShellUtils.quote(fridaFile.absolutePath)} $FRIDA_BINARY_PATH && chmod 755 $FRIDA_BINARY_PATH"
-            )
+            val target = ShellUtils.quote(config.binaryPath)
+            val copy = RootUtils.exec("cp ${ShellUtils.quote(fridaFile.absolutePath)} $target && chmod 755 $target")
             if (!copy.isSuccess) return@withContext false
 
             saveInstalledVersion(version)
-            isFridaServerInstalled()
+            isFridaServerInstalled(config)
         }
     }
 
@@ -455,63 +454,67 @@ object FridaUtils {
     // -------------------------------------------------------------------------
 
     /**
-     * Starts frida-server with no extra flags.
+     * Starts frida-server with no extra flags, on the configured port.
      * Delegates to startFridaServerWithFlags with an empty string.
      *
      * @return true if the server started successfully
      */
-    suspend fun startFridaServer(): Boolean = startFridaServerWithFlags("")
+    suspend fun startFridaServer(config: FridaServerConfig): Boolean = startFridaServerWithFlags("", config)
 
     /**
      * Starts frida-server with optional command-line flags.
      *
      * The flags are split into arguments (ShellUtils.splitArgs) and every argument is
      * quoted, so whatever the user types is passed to frida-server as data and can't
-     * run extra commands.
+     * run extra commands. A non-default port adds "-l 127.0.0.1:<port>", unless the
+     * flags already choose a listen address.
      *
      *  - nohup: keeps the process running after the shell that started it exits
      *  - </dev/null >/dev/null 2>&1: detaches it from the root shell's input and output
      *  - &: runs it in the background (non-blocking)
      *
      * @param flags Extra flags for frida-server (e.g., "-l 0.0.0.0:27042 --token=secret")
+     * @param config Binary name and port
      * @return true if the server is running after the start attempt,
      *         false if it isn't or [flags] has an unclosed quote
      */
-    suspend fun startFridaServerWithFlags(flags: String): Boolean {
+    suspend fun startFridaServerWithFlags(flags: String, config: FridaServerConfig): Boolean {
         val args = try {
-            ShellUtils.splitArgs(flags).joinToString("") { " " + ShellUtils.quote(it) }
+            val userArgs = ShellUtils.splitArgs(flags)
+            (config.listenArgs(userArgs) + userArgs).joinToString("") { " " + ShellUtils.quote(it) }
         } catch (e: IllegalArgumentException) {
             return false
         }
         return withContext(Dispatchers.IO) {
             // Don't start a second instance if it's already running
-            if (isFridaServerRunning()) return@withContext true
+            if (isFridaServerRunning(config)) return@withContext true
 
-            RootUtils.exec("nohup $FRIDA_BINARY_PATH$args </dev/null >/dev/null 2>&1 &")
+            RootUtils.exec("nohup ${ShellUtils.quote(config.binaryPath)}$args </dev/null >/dev/null 2>&1 &")
 
             // Wait 1.5 seconds for the server to fully initialize, then verify it is up
             Thread.sleep(1500)
-            isFridaServerRunning()
+            isFridaServerRunning(config)
         }
     }
 
     /**
-     * Stops every frida-server process.
+     * Stops every frida-server process (found by its configured name).
      *
      * pidof finds the processes by name and kill -9 (SIGKILL, can't be ignored)
      * ends them. killall is a fallback for unusual toolsets.
      *
      * @return true if no frida-server process is left
      */
-    suspend fun stopFridaServer(): Boolean {
+    suspend fun stopFridaServer(config: FridaServerConfig): Boolean {
         return withContext(Dispatchers.IO) {
-            RootUtils.exec("pids=\$(pidof frida-server) && kill -9 \$pids")
+            val name = ShellUtils.quote(config.name)
+            RootUtils.exec("pids=\$(pidof $name) && kill -9 \$pids")
             Thread.sleep(300)
-            if (!isFridaServerRunning()) return@withContext true
+            if (!isFridaServerRunning(config)) return@withContext true
 
-            RootUtils.exec("killall -9 frida-server")
+            RootUtils.exec("killall -9 $name")
             Thread.sleep(500)
-            !isFridaServerRunning()
+            !isFridaServerRunning(config)
         }
     }
 
@@ -522,11 +525,11 @@ object FridaUtils {
     /**
      * Checks whether the frida-server binary is installed on the device.
      *
-     * @return true if the binary exists at FRIDA_BINARY_PATH
+     * @return true if the binary exists at the configured path
      */
-    suspend fun isFridaServerInstalled(): Boolean {
+    suspend fun isFridaServerInstalled(config: FridaServerConfig): Boolean {
         return withContext(Dispatchers.IO) {
-            RootUtils.exec("[ -f $FRIDA_BINARY_PATH ]").isSuccess
+            RootUtils.exec("[ -f ${ShellUtils.quote(config.binaryPath)} ]").isSuccess
         }
     }
 
@@ -534,11 +537,11 @@ object FridaUtils {
      * Checks whether the frida-server process is currently running.
      * pidof exits with 0 only when at least one process matches.
      *
-     * @return true if a frida-server process is found
+     * @return true if a process with the configured name is found
      */
-    suspend fun isFridaServerRunning(): Boolean {
+    suspend fun isFridaServerRunning(config: FridaServerConfig): Boolean {
         return withContext(Dispatchers.IO) {
-            RootUtils.exec("pidof frida-server").isSuccess
+            RootUtils.exec("pidof ${ShellUtils.quote(config.name)}").isSuccess
         }
     }
 
@@ -549,11 +552,29 @@ object FridaUtils {
      *
      * @return true if the binary no longer exists after uninstallation
      */
-    suspend fun uninstallFridaServer(): Boolean {
+    suspend fun uninstallFridaServer(config: FridaServerConfig): Boolean {
         return withContext(Dispatchers.IO) {
-            if (isFridaServerRunning()) stopFridaServer()
-            RootUtils.exec("rm -f $FRIDA_BINARY_PATH $FRIDA_VERSION_FILE")
-            !isFridaServerInstalled()
+            if (isFridaServerRunning(config)) stopFridaServer(config)
+            RootUtils.exec("rm -f ${ShellUtils.quote(config.binaryPath)} $FRIDA_VERSION_FILE")
+            !isFridaServerInstalled(config)
+        }
+    }
+
+    /**
+     * Moves an installed binary from [from]'s name to [to]'s name, stopping it first.
+     *
+     * @return null on success, or the reason it failed
+     */
+    suspend fun renameFridaServer(from: FridaServerConfig, to: FridaServerConfig): String? {
+        return withContext(Dispatchers.IO) {
+            if (from.name == to.name) return@withContext null
+            val target = ShellUtils.quote(to.binaryPath)
+            if (RootUtils.exec("[ -e $target ]").isSuccess) {
+                return@withContext "${to.binaryPath} already exists"
+            }
+            if (isFridaServerRunning(from)) stopFridaServer(from)
+            val move = RootUtils.exec("mv ${ShellUtils.quote(from.binaryPath)} $target")
+            if (move.isSuccess) null else move.errorMessage
         }
     }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.hackpuntes.fridagate.data.AppPreferences
 import com.hackpuntes.fridagate.utils.FridaInjectUtils
 import com.hackpuntes.fridagate.utils.FridaUtils
 import com.hackpuntes.fridagate.utils.InputValidator
@@ -177,7 +178,7 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
     private fun checkEnvironment() {
         viewModelScope.launch {
             _isLoading.value = true
-            val running = FridaUtils.isFridaServerRunning()
+            val running = FridaUtils.isFridaServerRunning(AppPreferences(context).fridaServerConfig())
             _isFridaRunning.value = running
             addLog(if (running) "frida-server running ✓" else "frida-server not running")
 
