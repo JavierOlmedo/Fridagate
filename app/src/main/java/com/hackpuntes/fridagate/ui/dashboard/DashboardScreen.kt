@@ -24,6 +24,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hackpuntes.fridagate.data.AppPreferences
 import com.hackpuntes.fridagate.utils.FridaUtils
+import com.hackpuntes.fridagate.utils.InstalledApps
 import com.hackpuntes.fridagate.utils.ProxyUtils
 import com.hackpuntes.fridagate.utils.RootUtils
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,7 +51,8 @@ import kotlinx.coroutines.launch
  */
 class DashboardViewModel(context: Context) : ViewModel() {
 
-    private val prefs = AppPreferences(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val prefs = AppPreferences(appContext)
 
     // ── Status flags ──────────────────────────────────────────────────────────
 
@@ -159,8 +161,16 @@ class DashboardViewModel(context: Context) : ViewModel() {
             val httpPort = prefs.burpHttpPort.first()
             val httpsPort = prefs.burpHttpsPort.first()
 
-            addLog("Enabling iptables proxy → $ip:$httpPort...")
-            val proxyResult = ProxyUtils.enableIptablesProxy(ip, httpPort, httpsPort)
+            // Same target app as the Proxy tab ("" = every app)
+            val target = prefs.proxyTargetPackage.first()
+            val targetUid = if (target.isEmpty()) null else InstalledApps.uidOf(appContext, target)
+            if (target.isNotEmpty() && targetUid == null) {
+                addLog("ERROR: Proxy target $target is not installed — choose another in the Proxy tab")
+                _isLoading.value = false
+                return@launch
+            }
+            addLog("Enabling iptables proxy for ${if (targetUid == null) "every app" else target} → $ip:$httpPort...")
+            val proxyResult = ProxyUtils.enableIptablesProxy(ip, httpPort, httpsPort, targetUid = targetUid)
             _isProxyActive.value = proxyResult.success
             if (proxyResult.success) {
                 addLog("iptables proxy enabled")

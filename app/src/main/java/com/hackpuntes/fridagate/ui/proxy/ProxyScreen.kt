@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hackpuntes.fridagate.ui.components.AppPicker
+import com.hackpuntes.fridagate.utils.InstalledApps
 
 /**
  * ProxyScreen - The Proxy tab UI.
@@ -59,6 +61,9 @@ fun ProxyScreen() {
     val isSystemProxyEnabled by viewModel.isSystemProxyEnabled.collectAsState()
     val isBurpReachable by viewModel.isBurpReachable.collectAsState()
     val isCertInstalled by viewModel.isCertInstalled.collectAsState()
+    val targetPackage by viewModel.targetPackage.collectAsState()
+    val activeTarget by viewModel.activeTarget.collectAsState()
+    val installedApps by viewModel.installedApps.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val logs by viewModel.logs.collectAsState()
 
@@ -86,6 +91,10 @@ fun ProxyScreen() {
 
             // ── Section: Proxy Methods ────────────────────────────────────────
             ProxyMethodsCard(
+                apps = installedApps,
+                targetPackage = targetPackage,
+                activeTarget = activeTarget,
+                onTargetChange = { viewModel.setTargetPackage(it) },
                 isIptablesEnabled = isIptablesEnabled,
                 isSystemProxyEnabled = isSystemProxyEnabled,
                 isLoading = isLoading,
@@ -222,6 +231,10 @@ private fun ConnectionSettingsCard(
  */
 @Composable
 private fun ProxyMethodsCard(
+    apps: List<InstalledApps.AppInfo>,
+    targetPackage: String,
+    activeTarget: String?,
+    onTargetChange: (String) -> Unit,
     isIptablesEnabled: Boolean,
     isSystemProxyEnabled: Boolean,
     isLoading: Boolean,
@@ -243,13 +256,32 @@ private fun ProxyMethodsCard(
             // iptables switch — recommended method, captures all apps
             ProxyToggleRow(
                 title = "iptables Transparent Proxy",
-                subtitle = "Redirects TCP 80/443 of every app (recommended, requires root). " +
-                        "Enable 'Support invisible proxying' on the Burp listener. " +
+                subtitle = "Redirects TCP 80/443 of the target app, or of every app (recommended, " +
+                        "requires root). Enable 'Support invisible proxying' on the Burp listener. " +
                         "QUIC and IPv6 web traffic are blocked so apps fall back to TCP over IPv4.",
                 checked = isIptablesEnabled,
                 enabled = !isLoading,
                 onCheckedChange = onToggleIptables
             )
+            Spacer(modifier = Modifier.height(4.dp))
+            // Only one app's traffic keeps Burp free of the rest of the device's noise
+            AppPicker(
+                apps = apps,
+                selected = targetPackage,
+                enabled = !isLoading,
+                onSelect = onTargetChange,
+                label = "Target app",
+                allAppsOption = "All apps"
+            )
+            if (activeTarget != null) {
+                val name = apps.firstOrNull { it.packageName == activeTarget }?.name ?: activeTarget
+                Text(
+                    text = if (activeTarget.isEmpty()) "● Redirecting every app" else "● Redirecting only $name",
+                    color = Color(0xFF4CAF50),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Medium
+                )
+            }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 

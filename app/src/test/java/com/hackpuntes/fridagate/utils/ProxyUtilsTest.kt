@@ -54,11 +54,49 @@ class ProxyUtilsTest {
     }
 
     @Test
+    fun perAppModeLimitsRedirectAndLeakBlockingToTheTarget() {
+        val redirect = ProxyUtils.buildRedirectScript("192.168.1.10", 8080, 8080, targetUid = 10200)
+        assertTrue(redirect.contains("--dport 80 -m owner --uid-owner 10200 -j DNAT --to-destination 192.168.1.10:8080"))
+        assertTrue(redirect.contains("--dport 443 -m owner --uid-owner 10200 -j DNAT --to-destination 192.168.1.10:8080"))
+
+        val leaks = ProxyUtils.buildLeakBlockingScript(appUid = 10123, targetUid = 10200)
+        assertTrue(leaks.contains("iptables -w -A FRIDAGATE_FILTER -p udp --dport 443 -m owner --uid-owner 10200 -j REJECT"))
+        assertTrue(leaks.contains("ip6tables -w -A FRIDAGATE_FILTER -p tcp --dport 443 -m owner --uid-owner 10200 -j REJECT --reject-with tcp-reset"))
+        // Fridagate itself is still excluded
+        assertTrue(leaks.contains("-m owner --uid-owner 10123 -j RETURN"))
+    }
+
+    @Test
+    fun allAppsModeHasNoOwnerMatchOnRedirects() {
+        val redirect = ProxyUtils.buildRedirectScript("192.168.1.10", 8080, 8080)
+        assertFalse(redirect.lines().any { it.contains("DNAT") && it.contains("--uid-owner") })
+    }
+
+    @Test
+    fun readsTheTargetUidFromLiveRules() {
+        val perApp = """
+            -A OUTPUT -j FRIDAGATE_OUT
+            -A FRIDAGATE_OUT -m owner --uid-owner 10123 -j RETURN
+            -A FRIDAGATE_OUT -p tcp -m tcp --dport 80 -m owner --uid-owner 10200 -j DNAT --to-destination 192.168.1.10:8080
+        """.trimIndent()
+        assertEquals(10200, ProxyUtils.redirectTargetUid(perApp))
+
+        val everyApp = """
+            -A OUTPUT -j FRIDAGATE_OUT
+            -A FRIDAGATE_OUT -m owner --uid-owner 10123 -j RETURN
+            -A FRIDAGATE_OUT -p tcp -m tcp --dport 80 -j DNAT --to-destination 192.168.1.10:8080
+        """.trimIndent()
+        assertEquals(null, ProxyUtils.redirectTargetUid(everyApp))
+    }
+
+    @Test
     fun generatedScriptsAreValidShellSyntax() {
         assumeTrue(File("/bin/sh").canExecute())
         val scripts = listOf(
             ProxyUtils.buildRedirectScript("192.168.1.10", 8080, 8080),
             ProxyUtils.buildLeakBlockingScript(10123),
+            ProxyUtils.buildRedirectScript("192.168.1.10", 8080, 8080, targetUid = 10200),
+            ProxyUtils.buildLeakBlockingScript(10123, targetUid = 10200),
             ProxyUtils.buildDisableScript(),
             ProxyUtils.buildCaOverlayScript("/apex/com.android.conscrypt/cacerts", "/data/local/tmp/fridagate/9a5ba575.0")
         )

@@ -28,6 +28,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hackpuntes.fridagate.ui.components.AppPicker
+import com.hackpuntes.fridagate.utils.InstalledApps
 import com.hackpuntes.fridagate.utils.ScriptUtils
 
 @Composable
@@ -239,68 +241,17 @@ private fun EnvRow(label: String, value: String, isActive: Boolean) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TargetPackageCard(
-    apps: List<ExtrasViewModel.AppInfo>,
+    apps: List<InstalledApps.AppInfo>,
     selected: String,
     enabled: Boolean,
     onSelect: (String) -> Unit
 ) {
-    var expanded by remember { mutableStateOf(false) }
-
-    val displayName = apps.firstOrNull { it.packageName == selected }?.name ?: selected
-
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Target App", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-
-            ExposedDropdownMenuBox(
-                expanded = expanded && enabled,
-                onExpandedChange = { if (enabled) expanded = !expanded }
-            ) {
-                OutlinedTextField(
-                    value         = if (selected.isEmpty()) "" else if (displayName != selected) "$displayName\n$selected" else selected,
-                    onValueChange = {},
-                    readOnly      = true,
-                    label         = { Text("Select app") },
-                    placeholder   = { Text("No app selected") },
-                    trailingIcon  = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                    modifier      = Modifier
-                        .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, enabled)
-                        .fillMaxWidth(),
-                    enabled       = enabled,
-                    maxLines      = 2,
-                    textStyle     = MaterialTheme.typography.bodyMedium
-                )
-                ExposedDropdownMenu(
-                    expanded = expanded && enabled,
-                    onDismissRequest = { expanded = false },
-                    modifier = Modifier.heightIn(max = 300.dp)
-                ) {
-                    if (apps.isEmpty()) {
-                        DropdownMenuItem(
-                            text = { Text("Loading apps...", style = MaterialTheme.typography.bodySmall) },
-                            onClick = {}
-                        )
-                    } else {
-                        apps.forEach { app ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(app.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                                        Text(app.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                },
-                                onClick = {
-                                    onSelect(app.packageName)
-                                    expanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-            }
+            AppPicker(apps = apps, selected = selected, enabled = enabled, onSelect = onSelect)
         }
     }
 }

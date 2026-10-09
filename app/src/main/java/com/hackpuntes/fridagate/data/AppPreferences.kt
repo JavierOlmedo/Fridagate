@@ -58,6 +58,7 @@ class AppPreferences(private val context: Context) {
         val BURP_HTTP_PORT = intPreferencesKey("burp_http_port")
         val BURP_HTTPS_PORT = intPreferencesKey("burp_https_port")
         val FRIDA_SELECTED_VERSION = stringPreferencesKey("frida_selected_version")
+        val PROXY_TARGET_PACKAGE = stringPreferencesKey("proxy_target_package")
     }
 
     // -------------------------------------------------------------------------
@@ -135,6 +136,22 @@ class AppPreferences(private val context: Context) {
     suspend fun saveFridaSelectedVersion(version: String) {
         context.dataStore.edit { preferences ->
             preferences[Keys.FRIDA_SELECTED_VERSION] = version
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // iptables proxy target
+    // -------------------------------------------------------------------------
+
+    /** Package whose traffic the iptables proxy redirects; "" means every app */
+    val proxyTargetPackage: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[Keys.PROXY_TARGET_PACKAGE] ?: ""
+    }
+
+    /** Saves the iptables proxy target ("" for every app) */
+    suspend fun saveProxyTargetPackage(packageName: String) {
+        context.dataStore.edit { preferences ->
+            preferences[Keys.PROXY_TARGET_PACKAGE] = packageName
         }
     }
 

@@ -1,12 +1,12 @@
 package com.hackpuntes.fridagate.ui.extras
 
 import android.content.Context
-import android.content.pm.ApplicationInfo
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hackpuntes.fridagate.utils.FridaInjectUtils
 import com.hackpuntes.fridagate.utils.FridaUtils
 import com.hackpuntes.fridagate.utils.InputValidator
+import com.hackpuntes.fridagate.utils.InstalledApps
 import com.hackpuntes.fridagate.utils.ScriptUtils
 import com.hackpuntes.fridagate.utils.ScriptUtils.BypassScript
 import kotlinx.coroutines.Dispatchers
@@ -17,8 +17,6 @@ import kotlinx.coroutines.launch
 
 class ExtrasViewModel(private val context: Context) : ViewModel() {
 
-    data class AppInfo(val name: String, val packageName: String)
-
     val scripts: List<BypassScript> = ScriptUtils.SCRIPTS
 
     // -------------------------------------------------------------------------
@@ -28,8 +26,8 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
     private val _targetPackage = MutableStateFlow("")
     val targetPackage: StateFlow<String> = _targetPackage.asStateFlow()
 
-    private val _installedApps = MutableStateFlow<List<AppInfo>>(emptyList())
-    val installedApps: StateFlow<List<AppInfo>> = _installedApps.asStateFlow()
+    private val _installedApps = MutableStateFlow<List<InstalledApps.AppInfo>>(emptyList())
+    val installedApps: StateFlow<List<InstalledApps.AppInfo>> = _installedApps.asStateFlow()
 
     /** IDs of scripts currently toggled ON */
     private val _enabledScripts = MutableStateFlow(setOf(scripts.first().id))
@@ -141,20 +139,7 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
 
     private fun loadInstalledApps() {
         viewModelScope.launch(Dispatchers.IO) {
-            val pm = context.packageManager
-            val apps = pm.getInstalledPackages(0)
-                .filter { pkg ->
-                    val flags = pkg.applicationInfo?.flags ?: 0
-                    (flags and ApplicationInfo.FLAG_SYSTEM) == 0
-                }
-                .map { pkg ->
-                    AppInfo(
-                        name        = pkg.applicationInfo?.loadLabel(pm)?.toString() ?: pkg.packageName,
-                        packageName = pkg.packageName
-                    )
-                }
-                .sortedBy { it.name.lowercase() }
-            _installedApps.value = apps
+            _installedApps.value = InstalledApps.load(context)
         }
     }
 

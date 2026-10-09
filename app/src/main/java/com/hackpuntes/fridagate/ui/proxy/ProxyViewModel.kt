@@ -5,12 +5,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hackpuntes.fridagate.data.AppPreferences
 import com.hackpuntes.fridagate.utils.InputValidator
+import com.hackpuntes.fridagate.utils.InstalledApps
 import com.hackpuntes.fridagate.utils.ProxyUtils
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * ProxyViewModel - Manages the state and business logic for the Proxy screen.
@@ -31,9 +34,11 @@ import kotlinx.coroutines.launch
  */
 class ProxyViewModel(context: Context) : ViewModel() {
 
-    // AppPreferences instance for reading/writing persistent settings
     // We use applicationContext to avoid leaking the Activity
-    private val prefs = AppPreferences(context.applicationContext)
+    private val appContext = context.applicationContext
+
+    // AppPreferences instance for reading/writing persistent settings
+    private val prefs = AppPreferences(appContext)
 
     // -------------------------------------------------------------------------
     // Connection settings state
@@ -58,6 +63,21 @@ class ProxyViewModel(context: Context) : ViewModel() {
     /** Whether the iptables transparent proxy rules are currently active */
     private val _isIptablesEnabled = MutableStateFlow(false)
     val isIptablesEnabled: StateFlow<Boolean> = _isIptablesEnabled.asStateFlow()
+
+    /** App selected as iptables target: package name, or "" for every app */
+    private val _targetPackage = MutableStateFlow("")
+    val targetPackage: StateFlow<String> = _targetPackage.asStateFlow()
+
+    /**
+     * What the live rules redirect: null when inactive, "" for every app,
+     * otherwise the package name of the only redirected app
+     */
+    private val _activeTarget = MutableStateFlow<String?>(null)
+    val activeTarget: StateFlow<String?> = _activeTarget.asStateFlow()
+
+    /** Installed non-system apps, for the target picker */
+    private val _installedApps = MutableStateFlow<List<InstalledApps.AppInfo>>(emptyList())
+    val installedApps: StateFlow<List<InstalledApps.AppInfo>> = _installedApps.asStateFlow()
 
     /** Whether the Android system proxy is currently set */
     private val _isSystemProxyEnabled = MutableStateFlow(false)
@@ -95,6 +115,9 @@ class ProxyViewModel(context: Context) : ViewModel() {
             loadSavedSettings()
             refreshStatus()
         }
+        viewModelScope.launch {
+            _installedApps.value = withContext(Dispatchers.IO) { InstalledApps.load(appContext) }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -111,6 +134,7 @@ class ProxyViewModel(context: Context) : ViewModel() {
         _burpIp.value = prefs.burpIp.first()
         _httpPort.value = prefs.burpHttpPort.first()
         _httpsPort.value = prefs.burpHttpsPort.first()
+        _targetPackage.value = prefs.proxyTargetPackage.first()
         addLog("Settings loaded — Burp: ${_burpIp.value}:${_httpPort.value}")
     }
 
@@ -169,8 +193,7 @@ class ProxyViewModel(context: Context) : ViewModel() {
         _isLoading.value = true
 
         // Check iptables rules
-        val iptablesActive = ProxyUtils.isIptablesProxyEnabled()
-        _isIptablesEnabled.value = iptablesActive
+        val iptablesActive = updateRedirectState()
 
         // Check system proxy
         val systemProxy = ProxyUtils.getSystemProxy()
@@ -190,6 +213,21 @@ class ProxyViewModel(context: Context) : ViewModel() {
     }
 
     /**
+     * Changes the app whose traffic is redirected ("" for every app).
+     * If the redirect is on, the rules are applied again for the new target.
+     */
+    fun setTargetPackage(packageName: String) {
+        _targetPackage.value = packageName
+        viewModelScope.launch {
+            prefs.saveProxyTargetPackage(packageName)
+            if (_isIptablesEnabled.value) {
+                addLog("Target changed — applying the iptables rules again")
+                toggleIptablesProxy(true)
+            }
+        }
+    }
+
+    /**
      * Toggles the iptables transparent proxy on or off.
      *
      * If enabling: redirects TCP 80/443 to Burp and blocks QUIC / IPv6 web traffic.
@@ -203,14 +241,23 @@ class ProxyViewModel(context: Context) : ViewModel() {
             _isLoading.value = true
 
             if (enable) {
-                addLog("Enabling iptables proxy → ${_burpIp.value}:${_httpPort.value}/${_httpsPort.value}...")
+                val target = _targetPackage.value
+                val targetUid = if (target.isEmpty()) null else InstalledApps.uidOf(appContext, target)
+                if (target.isNotEmpty() && targetUid == null) {
+                    addLog("ERROR: $target is not installed — choose another target app")
+                    _isLoading.value = false
+                    return@launch
+                }
+                val who = if (targetUid == null) "every app" else target
+                addLog("Enabling iptables proxy for $who → ${_burpIp.value}:${_httpPort.value}/${_httpsPort.value}...")
                 val result = ProxyUtils.enableIptablesProxy(
                     burpIp = _burpIp.value,
                     httpPort = _httpPort.value,
-                    httpsPort = _httpsPort.value
+                    httpsPort = _httpsPort.value,
+                    targetUid = targetUid
                 )
                 if (result.success) {
-                    addLog("iptables proxy enabled — TCP 80/443 of every app goes to Burp")
+                    addLog("iptables proxy enabled — TCP 80/443 of $who goes to Burp")
                     addLog("Burp listener must have 'Support invisible proxying' enabled")
                     if (result.message.isNotEmpty()) addLog("WARNING: ${result.message}")
                 } else {
@@ -227,7 +274,7 @@ class ProxyViewModel(context: Context) : ViewModel() {
             }
 
             // Show what is really active, whatever the outcome
-            _isIptablesEnabled.value = ProxyUtils.isIptablesProxyEnabled()
+            updateRedirectState()
             _isLoading.value = false
         }
     }
@@ -322,6 +369,19 @@ class ProxyViewModel(context: Context) : ViewModel() {
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /** Reads the live iptables rules into the UI state. Returns whether the redirect is on. */
+    private suspend fun updateRedirectState(): Boolean {
+        val state = ProxyUtils.redirectState()
+        _isIptablesEnabled.value = state.active
+        _activeTarget.value = when {
+            !state.active -> null
+            state.targetUid == null -> ""
+            else -> withContext(Dispatchers.IO) { InstalledApps.packageOf(appContext, state.targetUid) }
+                ?: "uid ${state.targetUid}"
+        }
+        return state.active
+    }
 
     /** Logs an error and returns false if the Burp IP or ports are not usable */
     private fun validateBurpSettings(): Boolean {

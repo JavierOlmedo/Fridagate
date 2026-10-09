@@ -68,13 +68,20 @@ object ProxyUtils {
      * The last three are best effort: if they fail, the redirect still works and the
      * reason is returned in [OpResult.message].
      *
-     * @param appUid Fridagate's own uid, excluded from redirection
+     * With [targetUid], only that app's traffic is redirected (and only its QUIC/IPv6 is
+     * blocked); the rest of the device keeps its normal network. Connections the app
+     * delegates to other processes (DownloadManager, Google Play services) are not
+     * covered in that mode.
+     *
+     * @param appUid    Fridagate's own uid, excluded from redirection
+     * @param targetUid uid of the only app to redirect, or null for every app
      */
     suspend fun enableIptablesProxy(
         burpIp: String,
         httpPort: Int,
         httpsPort: Int,
-        appUid: Int = android.os.Process.myUid()
+        appUid: Int = android.os.Process.myUid(),
+        targetUid: Int? = null
     ): OpResult = withContext(Dispatchers.IO) {
         if (!InputValidator.isValidIpv4(burpIp)) {
             return@withContext OpResult(false, "Invalid Burp IP '$burpIp' (iptables needs an IPv4 address such as 192.168.1.10)")
@@ -83,13 +90,13 @@ object ProxyUtils {
             return@withContext OpResult(false, "Invalid Burp port: $httpPort / $httpsPort")
         }
 
-        val redirect = RootUtils.exec(buildRedirectScript(burpIp, httpPort, httpsPort))
+        val redirect = RootUtils.exec(buildRedirectScript(burpIp, httpPort, httpsPort, targetUid))
         if (!redirect.isSuccess) {
             RootUtils.exec(buildDisableScript()) // don't leave half the rules behind
             return@withContext OpResult(false, "iptables error: ${redirect.errorMessage}")
         }
 
-        val leakBlocking = RootUtils.exec(buildLeakBlockingScript(appUid))
+        val leakBlocking = RootUtils.exec(buildLeakBlockingScript(appUid, targetUid))
 
         if (!isIptablesProxyEnabled()) {
             return@withContext OpResult(false, "Rules were applied but are not active")
@@ -120,10 +127,32 @@ object ProxyUtils {
     }
 
     /** True if the DNAT redirect to Burp is active (ours, or one left by Fridagate 1.0.x) */
-    suspend fun isIptablesProxyEnabled(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun isIptablesProxyEnabled(): Boolean = redirectState().active
+
+    /**
+     * What the iptables redirect is doing right now.
+     * @param targetUid uid of the only redirected app, or null when every app is redirected
+     */
+    data class RedirectState(val active: Boolean, val targetUid: Int?)
+
+    /** Reads the live nat rules to tell whether the redirect is on, and for which app */
+    suspend fun redirectState(): RedirectState = withContext(Dispatchers.IO) {
         val rules = RootUtils.exec("$IPT -t nat -S")
-        rules.isSuccess && isRedirectActive(rules.stdout)
+        if (!rules.isSuccess) {
+            RedirectState(active = false, targetUid = null)
+        } else {
+            RedirectState(isRedirectActive(rules.stdout), redirectTargetUid(rules.stdout))
+        }
     }
+
+    /** uid in the owner match of our DNAT rules, or null when they apply to every app */
+    internal fun redirectTargetUid(natRules: String): Int? =
+        natRules.lines()
+            .map { it.trim() }
+            .filter { it.startsWith("-A $CHAIN_NAT_OUT ") && it.contains("-j DNAT") }
+            .firstNotNullOfOrNull { UID_OWNER.find(it)?.groupValues?.get(1)?.toIntOrNull() }
+
+    private val UID_OWNER = Regex("--uid-owner (\\d+)")
 
     /** Parses "iptables -t nat -S" output */
     internal fun isRedirectActive(natRules: String): Boolean {
@@ -134,13 +163,22 @@ object ProxyUtils {
         return (hooked && redirects) || legacy
     }
 
-    /** Core redirect rules. Starts from a clean state and stops at the first error. */
-    internal fun buildRedirectScript(burpIp: String, httpPort: Int, httpsPort: Int): String = buildString {
+    /**
+     * Core redirect rules. Starts from a clean state and stops at the first error.
+     * @param targetUid only redirect this app's connections, or every app when null
+     */
+    internal fun buildRedirectScript(
+        burpIp: String,
+        httpPort: Int,
+        httpsPort: Int,
+        targetUid: Int? = null
+    ): String = buildString {
+        val owner = ownerMatch(targetUid)
         appendLine(buildDisableScript())
         appendLine("set -e")
         appendLine("$IPT -t nat -N $CHAIN_NAT_OUT")
-        appendLine("$IPT -t nat -A $CHAIN_NAT_OUT -p tcp --dport 80 -j DNAT --to-destination $burpIp:$httpPort")
-        appendLine("$IPT -t nat -A $CHAIN_NAT_OUT -p tcp --dport 443 -j DNAT --to-destination $burpIp:$httpsPort")
+        appendLine("$IPT -t nat -A $CHAIN_NAT_OUT -p tcp --dport 80$owner -j DNAT --to-destination $burpIp:$httpPort")
+        appendLine("$IPT -t nat -A $CHAIN_NAT_OUT -p tcp --dport 443$owner -j DNAT --to-destination $burpIp:$httpsPort")
         appendLine("$IPT -t nat -I OUTPUT 1 -j $CHAIN_NAT_OUT")
         appendLine("$IPT -t nat -N $CHAIN_NAT_POST")
         for (port in linkedSetOf(httpPort, httpsPort)) {
@@ -153,21 +191,23 @@ object ProxyUtils {
      * Best-effort rules that close the usual ways traffic escapes a TCP redirect.
      * Runs every rule even if one fails, and exits non-zero if any failed.
      */
-    internal fun buildLeakBlockingScript(appUid: Int): String {
+    internal fun buildLeakBlockingScript(appUid: Int, targetUid: Int? = null): String {
+        // In per-app mode only the target loses QUIC and IPv6 web traffic
+        val owner = ownerMatch(targetUid)
         val rules = listOf(
             // Fridagate's own connections go out untouched (GitHub downloads keep working)
             "$IPT -t nat -I $CHAIN_NAT_OUT 1 -m owner --uid-owner $appUid -j RETURN",
             // QUIC / HTTP3 runs over UDP 443 and would skip the TCP redirect
             "$IPT -N $CHAIN_FILTER",
             "$IPT -A $CHAIN_FILTER -m owner --uid-owner $appUid -j RETURN",
-            "$IPT -A $CHAIN_FILTER -p udp --dport 443 -j REJECT",
+            "$IPT -A $CHAIN_FILTER -p udp --dport 443$owner -j REJECT",
             "$IPT -I OUTPUT 1 -j $CHAIN_FILTER",
             // IPv6 web traffic can't be sent to an IPv4 Burp: reject it so apps retry over IPv4
             "$IP6T -N $CHAIN_FILTER",
             "$IP6T -A $CHAIN_FILTER -m owner --uid-owner $appUid -j RETURN",
-            "$IP6T -A $CHAIN_FILTER -p tcp --dport 80 -j REJECT --reject-with tcp-reset",
-            "$IP6T -A $CHAIN_FILTER -p tcp --dport 443 -j REJECT --reject-with tcp-reset",
-            "$IP6T -A $CHAIN_FILTER -p udp --dport 443 -j REJECT",
+            "$IP6T -A $CHAIN_FILTER -p tcp --dport 80$owner -j REJECT --reject-with tcp-reset",
+            "$IP6T -A $CHAIN_FILTER -p tcp --dport 443$owner -j REJECT --reject-with tcp-reset",
+            "$IP6T -A $CHAIN_FILTER -p udp --dport 443$owner -j REJECT",
             "$IP6T -I OUTPUT 1 -j $CHAIN_FILTER"
         )
         return buildString {
@@ -176,6 +216,10 @@ object ProxyUtils {
             appendLine("exit \$rc")
         }
     }
+
+    /** " -m owner --uid-owner N" to limit a rule to one app, or "" for every app */
+    private fun ownerMatch(targetUid: Int?): String =
+        if (targetUid == null) "" else " -m owner --uid-owner $targetUid"
 
     /** Removes everything Fridagate adds. Safe to run when nothing is installed. */
     internal fun buildDisableScript(): String = buildString {

@@ -102,6 +102,23 @@ class IptablesNetnsTest {
     }
 
     @Test
+    fun perAppModeIsAcceptedAndReadBack() {
+        val output = runIsolatedOrFail(
+            """
+            ${sh(ProxyUtils.buildRedirectScript("192.168.1.10", 8080, 8080, targetUid = 10200))} || echo REDIRECT_FAILED
+            ${sh(ProxyUtils.buildLeakBlockingScript(10123, targetUid = 10200))} || echo LEAK_BLOCKING_FAILED
+            iptables -w -t nat -S
+            iptables -w -S
+            ip6tables -w -S
+            """
+        )
+        assertFalse(output, output.contains("FAILED"))
+        assertTrue(output, ProxyUtils.isRedirectActive(output))
+        assertEquals(output, 10200, ProxyUtils.redirectTargetUid(output))
+        assertTrue(output, output.lines().any { it.contains("--dport 443") && it.contains("--uid-owner 10200") && it.contains("REJECT") })
+    }
+
+    @Test
     fun disableRemovesRulesLeftByOlderVersions() {
         val output = runIsolatedOrFail(
             """
