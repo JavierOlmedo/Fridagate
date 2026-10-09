@@ -134,3 +134,11 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
+
+// Print skipped and failed unit tests in the console, so CI logs show them
+tasks.withType<Test>().configureEach {
+    testLogging {
+        events("skipped", "failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
