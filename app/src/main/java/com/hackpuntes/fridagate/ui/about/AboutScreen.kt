@@ -1,9 +1,14 @@
 package com.hackpuntes.fridagate.ui.about
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.net.Uri
+import android.os.Build
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -11,8 +16,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,20 +33,23 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hackpuntes.fridagate.BuildConfig
 import com.hackpuntes.fridagate.R
+import com.hackpuntes.fridagate.utils.Diagnostics
 
 /**
- * AboutScreen - Information about the app, author and links.
+ * AboutScreen - Information about the app, author and links, plus a diagnostics card.
  *
- * This screen is purely informational — no ViewModel needed because
- * there is no state to manage or business logic to run.
- * It just displays static content and opens URLs in the browser.
+ * Everything but the diagnostics is static content. The diagnostics need root,
+ * so AboutViewModel only runs them when the user asks.
  */
 @Composable
-fun AboutScreen() {
-    // Context is needed to launch an Intent (open a URL in the browser)
+fun AboutScreen(viewModel: AboutViewModel = viewModel()) {
+    // Context is needed to launch an Intent (open a URL in the browser) and copy the report
     val context = LocalContext.current
+    val diagnostics by viewModel.diagnostics.collectAsState()
+    val isRunningDiagnostics by viewModel.isRunning.collectAsState()
 
     /**
      * Helper lambda that opens a URL in the device's default browser.
@@ -65,7 +76,6 @@ fun AboutScreen() {
         // BitmapFactory can't decode them — it returns null and crashes.
         // Solution: use ContextCompat.getDrawable() which handles adaptive icons,
         // then draw it manually onto a Bitmap via Canvas.
-        val context = LocalContext.current
         val iconBitmap = remember {
             val drawable = ContextCompat.getDrawable(context, R.mipmap.ic_launcher)
             val bmp = Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888)
@@ -195,6 +205,14 @@ fun AboutScreen() {
             }
         }
 
+        // ── Diagnostics ───────────────────────────────────────────────────────
+        DiagnosticsCard(
+            sections = diagnostics,
+            isRunning = isRunningDiagnostics,
+            onRun = viewModel::runDiagnostics,
+            onCopy = { copyToClipboard(context, Diagnostics.format(diagnostics)) }
+        )
+
         // ── License ───────────────────────────────────────────────────────────
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
@@ -283,5 +301,101 @@ private fun LinkButton(
             contentDescription = "Open link",
             modifier = Modifier.size(16.dp)
         )
+    }
+}
+
+/**
+ * Runs the diagnostics and shows them grouped by section.
+ * "Copy report" puts the plain text version on the clipboard, ready for an issue.
+ */
+@Composable
+private fun DiagnosticsCard(
+    sections: List<Diagnostics.Section>,
+    isRunning: Boolean,
+    onRun: () -> Unit,
+    onCopy: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "🩺 Diagnostics",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = "Checks root, SELinux, iptables, the CA store, frida-server and the proxy. " +
+                        "The report leaves out the proxy address and the target app, so it can " +
+                        "go in a public issue.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            sections.forEach { section ->
+                Text(
+                    text = section.title,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                section.items.forEach { item ->
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = item.label,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(0.4f)
+                        )
+                        Text(
+                            text = item.value,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(0.6f)
+                        )
+                    }
+                }
+            }
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Button(
+                    onClick = onRun,
+                    enabled = !isRunning,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (isRunning) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text(if (sections.isEmpty()) "Run" else "Run again")
+                    }
+                }
+                OutlinedButton(
+                    onClick = onCopy,
+                    enabled = sections.isNotEmpty() && !isRunning,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Copy report")
+                }
+            }
+        }
+    }
+}
+
+/** Puts [text] on the clipboard. Android 13+ confirms it on its own, older versions get a toast. */
+private fun copyToClipboard(context: Context, text: String) {
+    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+    clipboard.setPrimaryClip(ClipData.newPlainText("Fridagate diagnostics", text))
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+        Toast.makeText(context, "Report copied", Toast.LENGTH_SHORT).show()
     }
 }

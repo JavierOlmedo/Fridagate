@@ -304,6 +304,9 @@ object ProxyUtils {
     private const val SYSTEM_CA_DIR = "/system/etc/security/cacerts"
     private const val APEX_CA_DIR = "/apex/com.android.conscrypt/cacerts"
 
+    // Staged files are named after the 8 hex digit subject_hash_old
+    private val CA_HASH = Regex("^[0-9a-f]{8}$")
+
     /** Outcome of a CA installation; [hash] names the staged file (<hash>.0) on success */
     data class CaInstallResult(val success: Boolean, val message: String, val hash: String? = null)
 
@@ -354,13 +357,12 @@ object ProxyUtils {
      *  3. Read the file back the way apps see it and compare it with the staged one.
      */
     suspend fun applyStagedCertificate(hash: String): OpResult = withContext(Dispatchers.IO) {
-        if (!Regex("^[0-9a-f]{8}$").matches(hash)) {
+        if (!CA_HASH.matches(hash)) {
             return@withContext OpResult(false, "Invalid certificate hash '$hash'")
         }
         val staged = "$CERT_STAGING_DIR/$hash.0"
-        val stagedCert = RootUtils.exec("cat $staged").let { result ->
-            if (!result.isSuccess) null else runCatching { CertUtils.parse(result.stdout.toByteArray()) }.getOrNull()
-        } ?: return@withContext OpResult(false, "No staged certificate at $staged. Install the CA again.")
+        val stagedCert = readStagedCertificate(hash)
+            ?: return@withContext OpResult(false, "No staged certificate at $staged. Install the CA again.")
 
         // Android 14+ reads CAs from the Conscrypt APEX instead of /system
         val apexStore = isApexStore()
@@ -419,8 +421,25 @@ object ProxyUtils {
         installed.encoded.contentEquals(cert.encoded)
     }
 
+    /**
+     * Whether apps see the staged <hash>.0 in the trust store right now. Unlike
+     * [isCaCertInstalled] it needs no proxy, so it also works away from it.
+     */
+    suspend fun isStagedCertificateActive(hash: String): Boolean = withContext(Dispatchers.IO) {
+        if (!CA_HASH.matches(hash)) return@withContext false
+        val staged = readStagedCertificate(hash) ?: return@withContext false
+        readInstalledCertificate(hash, isApexStore())?.encoded?.contentEquals(staged.encoded) == true
+    }
+
     /** True on Android 14+, where apps read CAs from the Conscrypt APEX */
-    private fun isApexStore(): Boolean = RootUtils.exec("[ -d $APEX_CA_DIR ]").isSuccess
+    internal fun isApexStore(): Boolean = RootUtils.exec("[ -d $APEX_CA_DIR ]").isSuccess
+
+    /** The certificate staged as /data/local/tmp/fridagate/<hash>.0, or null if missing or invalid */
+    private fun readStagedCertificate(hash: String): X509Certificate? {
+        val result = RootUtils.exec("cat $CERT_STAGING_DIR/$hash.0")
+        if (!result.isSuccess) return null
+        return runCatching { CertUtils.parse(result.stdout.toByteArray()) }.getOrNull()
+    }
 
     /** Writes [cert] as PEM to /data/local/tmp/fridagate/<hash>.0 and returns the hash, or null */
     private fun stageCertificate(cert: X509Certificate): String? {
