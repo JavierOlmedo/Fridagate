@@ -25,6 +25,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hackpuntes.fridagate.data.AppPreferences
 import com.hackpuntes.fridagate.utils.FridaUtils
 import com.hackpuntes.fridagate.utils.InstalledApps
+import com.hackpuntes.fridagate.utils.ProxyTool
 import com.hackpuntes.fridagate.utils.ProxyUtils
 import com.hackpuntes.fridagate.utils.RootUtils
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -72,6 +73,10 @@ class DashboardViewModel(context: Context) : ViewModel() {
     private val _isProxyActive = MutableStateFlow(false)
     val isProxyActive: StateFlow<Boolean> = _isProxyActive.asStateFlow()
 
+    /** Whether Android's global HTTP proxy is set */
+    private val _isSystemProxySet = MutableStateFlow(false)
+    val isSystemProxySet: StateFlow<Boolean> = _isSystemProxySet.asStateFlow()
+
     /** Whether Burp Suite is reachable at the saved IP/port */
     private val _isBurpReachable = MutableStateFlow(false)
     val isBurpReachable: StateFlow<Boolean> = _isBurpReachable.asStateFlow()
@@ -114,6 +119,8 @@ class DashboardViewModel(context: Context) : ViewModel() {
             // Check proxy
             val proxyActive = ProxyUtils.isIptablesProxyEnabled()
             _isProxyActive.value = proxyActive
+            val systemProxySet = ProxyUtils.getSystemProxy() != null
+            _isSystemProxySet.value = systemProxySet
 
             // Check Burp reachability using saved settings
             val ip = prefs.burpIp.first()
@@ -121,7 +128,7 @@ class DashboardViewModel(context: Context) : ViewModel() {
             val burpReachable = ProxyUtils.isBurpReachable(ip, port)
             _isBurpReachable.value = burpReachable
 
-            addLog("Root: $root | Frida: $fridaRunning | Proxy: $proxyActive | Interception proxy: $burpReachable")
+            addLog("Root: $root | Frida: $fridaRunning | iptables: $proxyActive | System proxy: $systemProxySet | Interception proxy: $burpReachable")
             _isLoading.value = false
         }
     }
@@ -131,7 +138,8 @@ class DashboardViewModel(context: Context) : ViewModel() {
     /**
      * Runs the full interception setup in sequence:
      *  1. Start frida-server (bypasses SSL pinning)
-     *  2. Enable iptables proxy (redirects all traffic to Burp)
+     *  2. Enable iptables proxy (redirects all traffic to the proxy), or the system
+     *     proxy with mitmproxy, which can't take the iptables redirect
      *
      * Uses a single coroutine so steps run in order, not in parallel.
      * Each step is logged so the user can follow the progress.
@@ -157,27 +165,37 @@ class DashboardViewModel(context: Context) : ViewModel() {
                 if (started) addLog("Frida server started") else addLog("ERROR: Failed to start frida-server")
             }
 
-            // Step 2: Enable iptables proxy
+            // Step 2: Send the traffic to the proxy
             val ip = prefs.burpIp.first()
             val httpPort = prefs.burpHttpPort.first()
             val httpsPort = prefs.burpHttpsPort.first()
 
             // Same target app as the Proxy tab ("" = every app)
             val target = prefs.proxyTargetPackage.first()
-            val targetUid = if (target.isEmpty()) null else InstalledApps.uidOf(appContext, target)
-            if (target.isNotEmpty() && targetUid == null) {
-                addLog("ERROR: Proxy target $target is not installed — choose another in the Proxy tab")
-                _isLoading.value = false
-                return@launch
-            }
-            addLog("Enabling iptables proxy for ${if (targetUid == null) "every app" else target} → $ip:$httpPort...")
-            val proxyResult = ProxyUtils.enableIptablesProxy(ip, httpPort, httpsPort, targetUid = targetUid)
-            _isProxyActive.value = proxyResult.success
-            if (proxyResult.success) {
-                addLog("iptables proxy enabled")
-                if (proxyResult.message.isNotEmpty()) addLog("WARNING: ${proxyResult.message}")
+
+            if (ProxyTool.fromName(prefs.proxyTool.first()) == ProxyTool.MITMPROXY) {
+                // mitmproxy only takes proxy requests, so the iptables redirect would break the traffic
+                addLog("mitmproxy can't take the iptables redirect — setting the system proxy to $ip:$httpPort...")
+                if (target.isNotEmpty()) addLog("WARNING: the system proxy applies to every app, not only $target")
+                val set = ProxyUtils.setSystemProxy(ip, httpPort)
+                _isSystemProxySet.value = set
+                if (set) addLog("System proxy set") else addLog("ERROR: Failed to set the system proxy")
             } else {
-                addLog("ERROR: Failed to enable proxy — ${proxyResult.message}")
+                val targetUid = if (target.isEmpty()) null else InstalledApps.uidOf(appContext, target)
+                if (target.isNotEmpty() && targetUid == null) {
+                    addLog("ERROR: Proxy target $target is not installed — choose another in the Proxy tab")
+                    _isLoading.value = false
+                    return@launch
+                }
+                addLog("Enabling iptables proxy for ${if (targetUid == null) "every app" else target} → $ip:$httpPort...")
+                val proxyResult = ProxyUtils.enableIptablesProxy(ip, httpPort, httpsPort, targetUid = targetUid)
+                _isProxyActive.value = proxyResult.success
+                if (proxyResult.success) {
+                    addLog("iptables proxy enabled")
+                    if (proxyResult.message.isNotEmpty()) addLog("WARNING: ${proxyResult.message}")
+                } else {
+                    addLog("ERROR: Failed to enable proxy — ${proxyResult.message}")
+                }
             }
 
             // Step 3: Verify Burp is reachable
@@ -228,8 +246,9 @@ class DashboardViewModel(context: Context) : ViewModel() {
             // Step 3: Clear system proxy (http_proxy + global_http_proxy)
             // Without this, the proxy setting persists across reboots and the WiFi shows "no internet"
             addLog("Clearing system proxy...")
-            ProxyUtils.clearSystemProxy()
-            addLog("System proxy cleared")
+            val cleared = ProxyUtils.clearSystemProxy()
+            _isSystemProxySet.value = !cleared
+            if (cleared) addLog("System proxy cleared") else addLog("ERROR: Failed to clear the system proxy")
 
             _isBurpReachable.value = false
             addLog("── DONE ──────────────────────────")
@@ -273,6 +292,7 @@ fun DashboardScreen() {
     val isFridaInstalled by viewModel.isFridaInstalled.collectAsState()
     val isFridaRunning by viewModel.isFridaRunning.collectAsState()
     val isProxyActive by viewModel.isProxyActive.collectAsState()
+    val isSystemProxySet by viewModel.isSystemProxySet.collectAsState()
     val isBurpReachable by viewModel.isBurpReachable.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val logs by viewModel.logs.collectAsState()
@@ -292,6 +312,7 @@ fun DashboardScreen() {
                 isFridaInstalled = isFridaInstalled,
                 isFridaRunning = isFridaRunning,
                 isProxyActive = isProxyActive,
+                isSystemProxySet = isSystemProxySet,
                 isBurpReachable = isBurpReachable
             )
 
@@ -334,6 +355,7 @@ private fun StatusOverviewCard(
     isFridaInstalled: Boolean,
     isFridaRunning: Boolean,
     isProxyActive: Boolean,
+    isSystemProxySet: Boolean,
     isBurpReachable: Boolean
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -355,6 +377,7 @@ private fun StatusOverviewCard(
             StatusIndicatorRow(label = "Frida Installed", active = isFridaInstalled, activeText = "Yes",        inactiveText = "No")
             StatusIndicatorRow(label = "Frida Running",   active = isFridaRunning,   activeText = "Running",    inactiveText = "Stopped")
             StatusIndicatorRow(label = "Proxy (iptables)",active = isProxyActive,    activeText = "Active",     inactiveText = "Inactive")
+            StatusIndicatorRow(label = "System Proxy",    active = isSystemProxySet, activeText = "Set",        inactiveText = "Not set")
             StatusIndicatorRow(label = "Proxy Reachable", active = isBurpReachable,  activeText = "Yes",        inactiveText = "No")
         }
     }
