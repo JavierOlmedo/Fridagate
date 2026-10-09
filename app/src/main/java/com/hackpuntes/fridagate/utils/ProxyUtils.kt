@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  *    proxied, Burp's listener must have "Support invisible proxying" enabled.
  *
  * Certificate installation:
- *    Burp's CA is added to the system trust store with an in-memory (tmpfs) overlay,
+ *    The proxy's CA (Burp, Caido or mitmproxy) is added to the system trust store with an in-memory (tmpfs) overlay,
  *    so /system never has to be remounted read-write. On Android 14+ the store lives
  *    in the Conscrypt APEX and the overlay is bind-mounted into zygote and every running
  *    app. The overlay disappears on reboot: install the CA again after rebooting.
@@ -304,42 +304,66 @@ object ProxyUtils {
     private const val SYSTEM_CA_DIR = "/system/etc/security/cacerts"
     private const val APEX_CA_DIR = "/apex/com.android.conscrypt/cacerts"
 
+    /** Outcome of a CA installation; [hash] names the staged file (<hash>.0) on success */
+    data class CaInstallResult(val success: Boolean, val message: String, val hash: String? = null)
+
     /**
-     * Installs Burp's CA into the system trust store (Android 7 to 14+).
+     * Installs the proxy's CA into the system trust store (Android 7 to 14+).
      *
      * Steps:
-     *  1. Download the CA from Burp's listener (http://ip:port/cert) inside the app,
-     *     compute its Android file name (subject_hash_old) and stage it as PEM.
-     *  2. Copy the current trusted CAs plus Burp's into a tmpfs mounted over
-     *     /system/etc/security/cacerts, in the global mount namespace.
-     *  3. Android 14+: bind that directory over the Conscrypt APEX store inside zygote
-     *     (apps launched from now on) and inside every running app.
-     *  4. Read the file back the way apps see it and compare it with Burp's CA.
+     *  1. Download the CA from the proxy (see [ProxyTool.caUrl]) inside the app,
+     *     compute its Android file name (subject_hash_old) and stage it as PEM in
+     *     /data/local/tmp/fridagate/<hash>.0, which survives reboots.
+     *  2. Apply the staged file with [applyStagedCertificate].
+     *  3. Check that what apps see is exactly the certificate the proxy serves.
      *
-     * Not persistent: the tmpfs is gone after a reboot. Target apps must be restarted
-     * to load the new trust store.
+     * Not persistent by itself: the overlay is gone after a reboot, unless the boot
+     * receiver applies the staged file again. Target apps must be restarted.
      */
-    suspend fun installBurpCertificate(burpIp: String, burpPort: Int): OpResult = withContext(Dispatchers.IO) {
-        if (!InputValidator.isValidIpv4(burpIp) || !InputValidator.isValidPort(burpPort)) {
-            return@withContext OpResult(false, "Invalid Burp address $burpIp:$burpPort")
-        }
-        val cert = downloadBurpCertificate(burpIp, burpPort)
-            ?: return@withContext OpResult(
-                false,
-                "Could not download http://$burpIp:$burpPort/cert. Is Burp listening on that address?"
-            )
-        val hash = CertUtils.subjectHashOld(cert)
-        val staged = "$CERT_STAGING_DIR/$hash.0"
+    suspend fun installCaCertificate(tool: ProxyTool, ip: String, port: Int): CaInstallResult =
+        withContext(Dispatchers.IO) {
+            if (!InputValidator.isValidIpv4(ip) || !InputValidator.isValidPort(port)) {
+                return@withContext CaInstallResult(false, "Invalid proxy address $ip:$port")
+            }
+            val cert = fetchCaCertificate(tool, ip, port)
+                ?: return@withContext CaInstallResult(
+                    false,
+                    "Could not download the CA from ${tool.caUrl(ip, port)}. Is ${tool.label} listening on $ip:$port?"
+                )
+            val hash = stageCertificate(cert)
+                ?: return@withContext CaInstallResult(false, "Could not stage the certificate in $CERT_STAGING_DIR")
 
-        val stage = RootUtils.exec(
-            "mkdir -p $CERT_STAGING_DIR && printf '%s' ${ShellUtils.quote(CertUtils.toPem(cert))} > $staged && chmod 644 $staged"
-        )
-        if (!stage.isSuccess) {
-            return@withContext OpResult(false, "Could not stage the certificate: ${stage.errorMessage}")
+            val applied = applyStagedCertificate(hash)
+            if (!applied.success) return@withContext CaInstallResult(false, applied.message, hash)
+
+            val installed = readInstalledCertificate(hash, isApexStore())
+            if (installed == null || !installed.encoded.contentEquals(cert.encoded)) {
+                return@withContext CaInstallResult(false, "The install ran but $hash.0 is not the CA ${tool.label} serves", hash)
+            }
+            CaInstallResult(true, applied.message, hash)
         }
+
+    /**
+     * Puts the staged <hash>.0 into the trust store apps read. Needs no network,
+     * so the boot receiver uses it to bring the CA back after a reboot.
+     *
+     *  1. Copy the current trusted CAs plus the staged one into a tmpfs mounted over
+     *     /system/etc/security/cacerts, in the global mount namespace.
+     *  2. Android 14+: bind that directory over the Conscrypt APEX store inside zygote
+     *     (apps launched from now on) and inside every running app.
+     *  3. Read the file back the way apps see it and compare it with the staged one.
+     */
+    suspend fun applyStagedCertificate(hash: String): OpResult = withContext(Dispatchers.IO) {
+        if (!Regex("^[0-9a-f]{8}$").matches(hash)) {
+            return@withContext OpResult(false, "Invalid certificate hash '$hash'")
+        }
+        val staged = "$CERT_STAGING_DIR/$hash.0"
+        val stagedCert = RootUtils.exec("cat $staged").let { result ->
+            if (!result.isSuccess) null else runCatching { CertUtils.parse(result.stdout.toByteArray()) }.getOrNull()
+        } ?: return@withContext OpResult(false, "No staged certificate at $staged. Install the CA again.")
 
         // Android 14+ reads CAs from the Conscrypt APEX instead of /system
-        val apexStore = RootUtils.exec("[ -d $APEX_CA_DIR ]").isSuccess
+        val apexStore = isApexStore()
         val namespaceNote = if (RootUtils.isGlobalMountNamespace || RootUtils.exec("command -v nsenter").isSuccess) {
             ""
         } else {
@@ -375,36 +399,53 @@ object ProxyUtils {
 
         val installed = readInstalledCertificate(hash, apexStore)
         val store = if (apexStore) "Conscrypt APEX store (Android 14+)" else "system store"
-        if (installed == null || !installed.encoded.contentEquals(cert.encoded)) {
+        if (installed == null || !installed.encoded.contentEquals(stagedCert.encoded)) {
             return@withContext OpResult(false, "The install ran but $hash.0 is not visible in the $store.$namespaceNote")
         }
-        OpResult(true, "Burp CA installed as $hash.0 in the $store.$namespaceNote")
+        OpResult(true, "CA installed as $hash.0 in the $store.$namespaceNote")
     }
 
     /**
-     * Whether the CA Burp is serving right now is trusted by the system.
-     * Compares the actual certificate, so a CA from an older Burp install doesn't count.
+     * Whether the CA the proxy is serving right now is trusted by the system.
+     * Compares the actual certificate, so a CA from an older proxy install doesn't count.
      *
-     * @return true / false, or null if Burp can't be reached to fetch its current CA
+     * @return true / false, or null if the proxy can't be reached to fetch its current CA
      */
-    suspend fun isBurpCertInstalled(burpIp: String, burpPort: Int): Boolean? = withContext(Dispatchers.IO) {
-        if (!InputValidator.isValidIpv4(burpIp) || !InputValidator.isValidPort(burpPort)) return@withContext null
-        val cert = downloadBurpCertificate(burpIp, burpPort) ?: return@withContext null
-        val apexStore = RootUtils.exec("[ -d $APEX_CA_DIR ]").isSuccess
-        val installed = readInstalledCertificate(CertUtils.subjectHashOld(cert), apexStore)
+    suspend fun isCaCertInstalled(tool: ProxyTool, ip: String, port: Int): Boolean? = withContext(Dispatchers.IO) {
+        if (!InputValidator.isValidIpv4(ip) || !InputValidator.isValidPort(port)) return@withContext null
+        val cert = fetchCaCertificate(tool, ip, port) ?: return@withContext null
+        val installed = readInstalledCertificate(CertUtils.subjectHashOld(cert), isApexStore())
             ?: return@withContext false
         installed.encoded.contentEquals(cert.encoded)
     }
 
-    /** Downloads Burp's CA (DER) straight from its listener. Null if unreachable or invalid. */
-    private fun downloadBurpCertificate(burpIp: String, burpPort: Int): X509Certificate? {
+    /** True on Android 14+, where apps read CAs from the Conscrypt APEX */
+    private fun isApexStore(): Boolean = RootUtils.exec("[ -d $APEX_CA_DIR ]").isSuccess
+
+    /** Writes [cert] as PEM to /data/local/tmp/fridagate/<hash>.0 and returns the hash, or null */
+    private fun stageCertificate(cert: X509Certificate): String? {
+        val hash = CertUtils.subjectHashOld(cert)
+        val staged = "$CERT_STAGING_DIR/$hash.0"
+        val result = RootUtils.exec(
+            "mkdir -p $CERT_STAGING_DIR && printf '%s' ${ShellUtils.quote(CertUtils.toPem(cert))} > $staged && chmod 644 $staged"
+        )
+        return if (result.isSuccess) hash else null
+    }
+
+    /**
+     * Downloads the proxy's CA. Burp and Caido serve it on their listener; mitmproxy only
+     * answers http://mitm.it to clients that use it as their proxy.
+     * Null if unreachable or not a certificate.
+     */
+    private fun fetchCaCertificate(tool: ProxyTool, ip: String, port: Int): X509Certificate? {
         return try {
+            val proxy = if (tool.caViaProxy) Proxy(Proxy.Type.HTTP, InetSocketAddress(ip, port)) else Proxy.NO_PROXY
             val client = OkHttpClient.Builder()
-                .proxy(Proxy.NO_PROXY) // talk to Burp directly even if the system proxy points at it
+                .proxy(proxy) // never the system proxy, which may point at the proxy itself
                 .connectTimeout(3, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
                 .build()
-            val request = Request.Builder().url("http://$burpIp:$burpPort/cert").build()
+            val request = Request.Builder().url(tool.caUrl(ip, port)).build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) null else CertUtils.parse(response.body.bytes())
             }

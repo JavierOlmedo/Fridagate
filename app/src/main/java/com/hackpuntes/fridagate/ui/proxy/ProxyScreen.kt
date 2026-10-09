@@ -25,6 +25,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hackpuntes.fridagate.ui.components.AppPicker
 import com.hackpuntes.fridagate.utils.InstalledApps
+import com.hackpuntes.fridagate.utils.ProxyTool
 
 /**
  * ProxyScreen - The Proxy tab UI.
@@ -61,6 +62,9 @@ fun ProxyScreen() {
     val isSystemProxyEnabled by viewModel.isSystemProxyEnabled.collectAsState()
     val isBurpReachable by viewModel.isBurpReachable.collectAsState()
     val isCertInstalled by viewModel.isCertInstalled.collectAsState()
+    val proxyTool by viewModel.proxyTool.collectAsState()
+    val hasStagedCa by viewModel.hasStagedCa.collectAsState()
+    val caReinstallOnBoot by viewModel.caReinstallOnBoot.collectAsState()
     val targetPackage by viewModel.targetPackage.collectAsState()
     val activeTarget by viewModel.activeTarget.collectAsState()
     val installedApps by viewModel.installedApps.collectAsState()
@@ -78,6 +82,8 @@ fun ProxyScreen() {
 
             // ── Section: Burp Connection Settings ─────────────────────────────
             ConnectionSettingsCard(
+                tool = proxyTool,
+                onToolChange = { viewModel.setProxyTool(it) },
                 ip = burpIp,
                 httpPort = httpPort,
                 httpsPort = httpsPort,
@@ -95,6 +101,7 @@ fun ProxyScreen() {
                 targetPackage = targetPackage,
                 activeTarget = activeTarget,
                 onTargetChange = { viewModel.setTargetPackage(it) },
+                transparentHint = proxyTool.transparentHint,
                 isIptablesEnabled = isIptablesEnabled,
                 isSystemProxyEnabled = isSystemProxyEnabled,
                 isLoading = isLoading,
@@ -104,9 +111,13 @@ fun ProxyScreen() {
 
             // ── Section: Certificate ──────────────────────────────────────────
             CertificateCard(
+                tool = proxyTool,
                 isCertInstalled = isCertInstalled,
+                hasStagedCa = hasStagedCa,
+                reinstallOnBoot = caReinstallOnBoot,
+                onReinstallOnBootChange = { viewModel.setCaReinstallOnBoot(it) },
                 isLoading = isLoading,
-                onInstallCert = { viewModel.installBurpCertificate() }
+                onInstallCert = { viewModel.installCaCertificate() }
             )
 
             // ── Section: Log ──────────────────────────────────────────────────
@@ -143,6 +154,8 @@ fun ProxyScreen() {
  */
 @Composable
 private fun ConnectionSettingsCard(
+    tool: ProxyTool,
+    onToolChange: (ProxyTool) -> Unit,
     ip: String,
     httpPort: Int,
     httpsPort: Int,
@@ -159,16 +172,29 @@ private fun ConnectionSettingsCard(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "Burp Suite Connection",
+                text = "Proxy Connection",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary
             )
+
+            // Which interception proxy runs on the PC: decides where its CA is downloaded from
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                ProxyTool.entries.forEachIndexed { index, option ->
+                    SegmentedButton(
+                        selected = option == tool,
+                        onClick = { onToolChange(option) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = ProxyTool.entries.size),
+                        enabled = !isLoading,
+                        label = { Text(option.label, maxLines = 1) }
+                    )
+                }
+            }
 
             // IP address field
             OutlinedTextField(
                 value = ip,
                 onValueChange = onIpChange,
-                label = { Text("Burp IP Address") },
+                label = { Text("${tool.label} IP Address") },
                 placeholder = { Text("192.168.1.100") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
@@ -209,8 +235,8 @@ private fun ConnectionSettingsCard(
                 // null = not tested yet, true = reachable, false = unreachable
                 val (statusText, statusColor) = when (isBurpReachable) {
                     null  -> "Not tested" to Color.Gray
-                    true  -> "● Burp reachable" to Color(0xFF4CAF50)
-                    false -> "● Burp unreachable" to Color(0xFFF44336)
+                    true  -> "● ${tool.label} reachable" to Color(0xFF4CAF50)
+                    false -> "● ${tool.label} unreachable" to Color(0xFFF44336)
                 }
                 Text(text = statusText, color = statusColor, fontWeight = FontWeight.Medium)
 
@@ -235,6 +261,7 @@ private fun ProxyMethodsCard(
     targetPackage: String,
     activeTarget: String?,
     onTargetChange: (String) -> Unit,
+    transparentHint: String,
     isIptablesEnabled: Boolean,
     isSystemProxyEnabled: Boolean,
     isLoading: Boolean,
@@ -257,7 +284,7 @@ private fun ProxyMethodsCard(
             ProxyToggleRow(
                 title = "iptables Transparent Proxy",
                 subtitle = "Redirects TCP 80/443 of the target app, or of every app (recommended, " +
-                        "requires root). Enable 'Support invisible proxying' on the Burp listener. " +
+                        "requires root). $transparentHint " +
                         "QUIC and IPv6 web traffic are blocked so apps fall back to TCP over IPv4.",
                 checked = isIptablesEnabled,
                 enabled = !isLoading,
@@ -340,7 +367,11 @@ private fun ProxyToggleRow(
  */
 @Composable
 private fun CertificateCard(
+    tool: ProxyTool,
     isCertInstalled: Boolean?,
+    hasStagedCa: Boolean,
+    reinstallOnBoot: Boolean,
+    onReinstallOnBootChange: (Boolean) -> Unit,
     isLoading: Boolean,
     onInstallCert: () -> Unit
 ) {
@@ -350,19 +381,19 @@ private fun CertificateCard(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "SSL Certificate",
+                text = "CA Certificate",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "Adds Burp's CA to the system trust store to intercept HTTPS (Android 7 to 14+, " +
-                        "requires root). It lives in memory: install it again after every reboot, " +
-                        "and restart target apps after installing.",
+                text = "Adds the ${tool.label} CA to the system trust store to intercept HTTPS " +
+                        "(Android 7 to 14+, requires root). It lives in memory and is lost on reboot, " +
+                        "unless it is installed again at boot. Restart target apps after installing.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             val (certText, certColor) = when (isCertInstalled) {
-                null  -> "Unknown (Burp unreachable)" to Color.Gray
+                null  -> "Unknown (${tool.label} unreachable)" to Color.Gray
                 true  -> "● Trusted by the system" to Color(0xFF4CAF50)
                 false -> "● Not installed" to Color(0xFFF44336)
             }
@@ -372,8 +403,17 @@ private fun CertificateCard(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !isLoading
             ) {
-                Text("Install Burp CA Certificate")
+                Text("Install ${tool.label} CA Certificate")
             }
+            // Re-applies the last installed CA from /data/local/tmp after every reboot
+            ProxyToggleRow(
+                title = "Install again at boot",
+                subtitle = if (hasStagedCa) "Re-applies the last installed CA after every reboot"
+                           else "Install a CA first",
+                checked = reinstallOnBoot,
+                enabled = !isLoading && hasStagedCa,
+                onCheckedChange = onReinstallOnBootChange
+            )
         }
     }
 }

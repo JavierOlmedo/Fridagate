@@ -120,7 +120,7 @@ class DashboardViewModel(context: Context) : ViewModel() {
             val burpReachable = ProxyUtils.isBurpReachable(ip, port)
             _isBurpReachable.value = burpReachable
 
-            addLog("Root: $root | Frida: $fridaRunning | Proxy: $proxyActive | Burp: $burpReachable")
+            addLog("Root: $root | Frida: $fridaRunning | Proxy: $proxyActive | Interception proxy: $burpReachable")
             _isLoading.value = false
         }
     }
@@ -180,13 +180,13 @@ class DashboardViewModel(context: Context) : ViewModel() {
             }
 
             // Step 3: Verify Burp is reachable
-            addLog("Checking Burp Suite at $ip:$httpPort...")
+            addLog("Checking the interception proxy at $ip:$httpPort...")
             val burpReachable = ProxyUtils.isBurpReachable(ip, httpPort)
             _isBurpReachable.value = burpReachable
             if (burpReachable) {
-                addLog("Burp reachable — interception is ACTIVE")
+                addLog("Proxy reachable — interception is ACTIVE")
             } else {
-                addLog("WARNING: Burp not reachable — make sure Burp is running on your PC")
+                addLog("WARNING: Proxy not reachable — make sure Burp, Caido or mitmproxy is running on your PC")
             }
 
             addLog("── DONE ──────────────────────────")
@@ -354,7 +354,7 @@ private fun StatusOverviewCard(
             StatusIndicatorRow(label = "Frida Installed", active = isFridaInstalled, activeText = "Yes",        inactiveText = "No")
             StatusIndicatorRow(label = "Frida Running",   active = isFridaRunning,   activeText = "Running",    inactiveText = "Stopped")
             StatusIndicatorRow(label = "Proxy (iptables)",active = isProxyActive,    activeText = "Active",     inactiveText = "Inactive")
-            StatusIndicatorRow(label = "Burp Reachable",  active = isBurpReachable,  activeText = "Yes",        inactiveText = "No")
+            StatusIndicatorRow(label = "Proxy Reachable", active = isBurpReachable,  activeText = "Yes",        inactiveText = "No")
         }
     }
 }

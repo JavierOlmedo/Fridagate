@@ -3,6 +3,7 @@ package com.hackpuntes.fridagate.data
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -59,6 +60,9 @@ class AppPreferences(private val context: Context) {
         val BURP_HTTPS_PORT = intPreferencesKey("burp_https_port")
         val FRIDA_SELECTED_VERSION = stringPreferencesKey("frida_selected_version")
         val PROXY_TARGET_PACKAGE = stringPreferencesKey("proxy_target_package")
+        val PROXY_TOOL = stringPreferencesKey("proxy_tool")
+        val CA_HASH = stringPreferencesKey("ca_hash")
+        val CA_REINSTALL_ON_BOOT = booleanPreferencesKey("ca_reinstall_on_boot")
     }
 
     // -------------------------------------------------------------------------
@@ -153,6 +157,37 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit { preferences ->
             preferences[Keys.PROXY_TARGET_PACKAGE] = packageName
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Proxy tool and CA certificate
+    // -------------------------------------------------------------------------
+
+    /** Name of the selected ProxyTool (BURP, CAIDO, MITMPROXY) */
+    val proxyTool: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[Keys.PROXY_TOOL] ?: "BURP"
+    }
+
+    suspend fun saveProxyTool(name: String) {
+        context.dataStore.edit { preferences -> preferences[Keys.PROXY_TOOL] = name }
+    }
+
+    /** subject_hash_old of the last installed CA (file <hash>.0 staged in /data/local/tmp), "" if none */
+    val caHash: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[Keys.CA_HASH] ?: ""
+    }
+
+    suspend fun saveCaHash(hash: String) {
+        context.dataStore.edit { preferences -> preferences[Keys.CA_HASH] = hash }
+    }
+
+    /** Whether the boot receiver installs the staged CA again after every reboot */
+    val caReinstallOnBoot: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[Keys.CA_REINSTALL_ON_BOOT] ?: false
+    }
+
+    suspend fun saveCaReinstallOnBoot(enabled: Boolean) {
+        context.dataStore.edit { preferences -> preferences[Keys.CA_REINSTALL_ON_BOOT] = enabled }
     }
 
     // -------------------------------------------------------------------------

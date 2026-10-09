@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
+    <!-- RECEIVE_BOOT_COMPLETED: installs the proxy CA again after a reboot, when enabled -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- usesCleartextTraffic: Burp serves its CA over plain HTTP (http://<burp-ip>:<port>/cert).
          Since Android 9 cleartext is blocked by default and the CA download would fail.
          Everything else (GitHub API and downloads) uses HTTPS. -->
@@ -33,6 +36,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Not exported: only the system delivers BOOT_COMPLETED to it -->
+        <receiver
+            android:name=".boot.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

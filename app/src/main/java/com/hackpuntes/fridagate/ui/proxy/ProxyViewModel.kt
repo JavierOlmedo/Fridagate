@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.hackpuntes.fridagate.data.AppPreferences
 import com.hackpuntes.fridagate.utils.InputValidator
 import com.hackpuntes.fridagate.utils.InstalledApps
+import com.hackpuntes.fridagate.utils.ProxyTool
 import com.hackpuntes.fridagate.utils.ProxyUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,11 +20,11 @@ import kotlinx.coroutines.withContext
  * ProxyViewModel - Manages the state and business logic for the Proxy screen.
  *
  * Responsibilities:
- *  - Load and save Burp Suite connection settings (IP, ports) via AppPreferences
+ *  - Load and save the proxy settings (tool, IP, ports) via AppPreferences
  *  - Enable/disable the iptables transparent proxy
  *  - Enable/disable the system-level HTTP proxy
- *  - Test connectivity to Burp Suite
- *  - Install Burp's CA certificate and show whether the system trusts it
+ *  - Test connectivity to the proxy (Burp Suite, Caido or mitmproxy)
+ *  - Install the proxy's CA certificate and show whether the system trusts it
  *  - Maintain a log of operations shown in the UI
  *
  * @param context Needed to instantiate AppPreferences (which needs Context for DataStore)
@@ -43,6 +44,10 @@ class ProxyViewModel(context: Context) : ViewModel() {
     // -------------------------------------------------------------------------
     // Connection settings state
     // -------------------------------------------------------------------------
+
+    /** Interception proxy in use: decides where its CA is downloaded from */
+    private val _proxyTool = MutableStateFlow(ProxyTool.BURP)
+    val proxyTool: StateFlow<ProxyTool> = _proxyTool.asStateFlow()
 
     /** The Burp Suite IP address entered by the user */
     private val _burpIp = MutableStateFlow(AppPreferences.DEFAULT_BURP_IP)
@@ -91,11 +96,19 @@ class ProxyViewModel(context: Context) : ViewModel() {
     val isBurpReachable: StateFlow<Boolean?> = _isBurpReachable.asStateFlow()
 
     /**
-     * Whether the CA that Burp is serving right now is trusted by the system.
-     * null = unknown (Burp not reachable, so its current CA can't be fetched)
+     * Whether the CA the proxy is serving right now is trusted by the system.
+     * null = unknown (proxy not reachable, so its current CA can't be fetched)
      */
     private val _isCertInstalled = MutableStateFlow<Boolean?>(null)
     val isCertInstalled: StateFlow<Boolean?> = _isCertInstalled.asStateFlow()
+
+    /** Whether a CA has been staged, so it can be installed again at boot */
+    private val _hasStagedCa = MutableStateFlow(false)
+    val hasStagedCa: StateFlow<Boolean> = _hasStagedCa.asStateFlow()
+
+    /** Whether the staged CA is installed again after every reboot */
+    private val _caReinstallOnBoot = MutableStateFlow(false)
+    val caReinstallOnBoot: StateFlow<Boolean> = _caReinstallOnBoot.asStateFlow()
 
     /** Whether a background operation is running (shows loading indicator) */
     private val _isLoading = MutableStateFlow(false)
@@ -135,7 +148,10 @@ class ProxyViewModel(context: Context) : ViewModel() {
         _httpPort.value = prefs.burpHttpPort.first()
         _httpsPort.value = prefs.burpHttpsPort.first()
         _targetPackage.value = prefs.proxyTargetPackage.first()
-        addLog("Settings loaded — Burp: ${_burpIp.value}:${_httpPort.value}")
+        _proxyTool.value = ProxyTool.fromName(prefs.proxyTool.first())
+        _hasStagedCa.value = prefs.caHash.first().isNotEmpty()
+        _caReinstallOnBoot.value = prefs.caReinstallOnBoot.first()
+        addLog("Settings loaded — ${_proxyTool.value.label}: ${_burpIp.value}:${_httpPort.value}")
     }
 
     /**
@@ -199,17 +215,37 @@ class ProxyViewModel(context: Context) : ViewModel() {
         val systemProxy = ProxyUtils.getSystemProxy()
         _isSystemProxyEnabled.value = systemProxy != null
 
-        // Check whether the system trusts the CA Burp is serving now
-        val certInstalled = ProxyUtils.isBurpCertInstalled(_burpIp.value, _httpPort.value)
+        // Check whether the system trusts the CA the proxy is serving now
+        val certInstalled = ProxyUtils.isCaCertInstalled(_proxyTool.value, _burpIp.value, _httpPort.value)
         _isCertInstalled.value = certInstalled
 
         val certText = when (certInstalled) {
             true -> "trusted"
             false -> "not installed"
-            null -> "unknown (Burp unreachable)"
+            null -> "unknown (${_proxyTool.value.label} unreachable)"
         }
         addLog("Proxy status — iptables: $iptablesActive, system: ${systemProxy ?: "none"}, CA: $certText")
         _isLoading.value = false
+    }
+
+    /** Changes the interception proxy and re-checks whether its CA is trusted */
+    fun setProxyTool(tool: ProxyTool) {
+        if (tool == _proxyTool.value) return
+        _proxyTool.value = tool
+        viewModelScope.launch {
+            prefs.saveProxyTool(tool.name)
+            addLog("Proxy tool: ${tool.label}")
+            refreshStatus()
+        }
+    }
+
+    /** Turns on or off installing the staged CA again at every boot */
+    fun setCaReinstallOnBoot(enabled: Boolean) {
+        _caReinstallOnBoot.value = enabled
+        viewModelScope.launch {
+            prefs.saveCaReinstallOnBoot(enabled)
+            addLog(if (enabled) "The CA will be installed again at every boot" else "CA re-install at boot disabled")
+        }
     }
 
     /**
@@ -257,8 +293,8 @@ class ProxyViewModel(context: Context) : ViewModel() {
                     targetUid = targetUid
                 )
                 if (result.success) {
-                    addLog("iptables proxy enabled — TCP 80/443 of $who goes to Burp")
-                    addLog("Burp listener must have 'Support invisible proxying' enabled")
+                    addLog("iptables proxy enabled — TCP 80/443 of $who goes to ${_proxyTool.value.label}")
+                    addLog(_proxyTool.value.transparentHint)
                     if (result.message.isNotEmpty()) addLog("WARNING: ${result.message}")
                 } else {
                     addLog("ERROR: ${result.message}")
@@ -293,7 +329,7 @@ class ProxyViewModel(context: Context) : ViewModel() {
                 addLog("Setting system proxy → ${_burpIp.value}:${_httpPort.value}...")
                 val success = ProxyUtils.setSystemProxy(_burpIp.value, _httpPort.value)
                 if (success) {
-                    addLog("System proxy set — apps that respect proxy will use Burp")
+                    addLog("System proxy set — apps that respect it will use ${_proxyTool.value.label}")
                 } else {
                     addLog("ERROR: Failed to set system proxy")
                 }
@@ -325,10 +361,11 @@ class ProxyViewModel(context: Context) : ViewModel() {
             val reachable = ProxyUtils.isBurpReachable(_burpIp.value, _httpPort.value)
             _isBurpReachable.value = reachable
 
+            val label = _proxyTool.value.label
             if (reachable) {
-                addLog("Burp Suite is reachable at ${_burpIp.value}:${_httpPort.value}")
+                addLog("$label is reachable at ${_burpIp.value}:${_httpPort.value}")
             } else {
-                addLog("Cannot reach Burp Suite — verify IP, port, and that Burp is running")
+                addLog("Cannot reach $label — check the IP, the port and that it is running")
             }
 
             _isLoading.value = false
@@ -336,26 +373,31 @@ class ProxyViewModel(context: Context) : ViewModel() {
     }
 
     /**
-     * Downloads Burp's CA certificate and adds it to the Android system trust store.
-     * The certificate lives in memory: it must be installed again after a reboot.
+     * Downloads the proxy's CA certificate and adds it to the Android system trust store.
+     * The certificate lives in memory: it is lost on reboot unless re-install at boot is on.
      */
-    fun installBurpCertificate() {
+    fun installCaCertificate() {
         if (!validateBurpSettings()) return
         viewModelScope.launch {
             _isLoading.value = true
-            addLog("Installing Burp CA from http://${_burpIp.value}:${_httpPort.value}/cert...")
+            val tool = _proxyTool.value
+            addLog("Installing the ${tool.label} CA from ${tool.caUrl(_burpIp.value, _httpPort.value)}...")
 
-            val result = ProxyUtils.installBurpCertificate(_burpIp.value, _httpPort.value)
+            val result = ProxyUtils.installCaCertificate(tool, _burpIp.value, _httpPort.value)
 
+            if (result.hash != null) {
+                prefs.saveCaHash(result.hash)
+                _hasStagedCa.value = true
+            }
             if (result.success) {
                 addLog(result.message)
                 addLog("Restart target apps so they load the new CA")
-                addLog("Not persistent: install it again after every reboot")
+                if (!_caReinstallOnBoot.value) addLog("Not persistent: install it again after a reboot, or enable re-install at boot")
             } else {
                 addLog("ERROR: ${result.message}")
             }
 
-            _isCertInstalled.value = ProxyUtils.isBurpCertInstalled(_burpIp.value, _httpPort.value)
+            _isCertInstalled.value = ProxyUtils.isCaCertInstalled(tool, _burpIp.value, _httpPort.value)
             _isLoading.value = false
         }
     }
