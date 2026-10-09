@@ -133,21 +133,19 @@ object ScriptUtils {
                 val tmpPath       = "$SCRIPT_DIR/${script.fileName}"
                 val downloadsPath = "$DOWNLOADS_DIR/${script.fileName}"
 
-                // Copy to /data/local/tmp/
-                RootUtils.executeSuCommand("cp ${tempFile.absolutePath} $tmpPath")
-                RootUtils.executeSuCommand("chmod 644 $tmpPath")
+                val source = ShellUtils.quote(tempFile.absolutePath)
+                val tmpTarget = ShellUtils.quote(tmpPath)
+                val downloadsTarget = ShellUtils.quote(downloadsPath)
 
-                // Copy to /sdcard/Download/ so the host can pull it via adb
-                RootUtils.executeSuCommand("cp ${tempFile.absolutePath} $downloadsPath")
-                RootUtils.executeSuCommand("chmod 644 $downloadsPath")
+                // Copy to /data/local/tmp/ (required)
+                val copied = RootUtils.exec("cp $source $tmpTarget && chmod 644 $tmpTarget").isSuccess
+
+                // Copy to /sdcard/Download/ so the host can pull it via adb (best effort)
+                RootUtils.exec("cp $source $downloadsTarget && chmod 644 $downloadsTarget")
 
                 tempFile.delete()
 
-                // Verify at least the tmp path exists
-                val check = RootUtils.executeSuCommand("ls $tmpPath")
-                val ok = check.contains(script.fileName) && !check.contains("No such file")
-
-                if (ok) DeployResult(tmpPath, downloadsPath) else null
+                if (copied) DeployResult(tmpPath, downloadsPath) else null
             } catch (e: Exception) {
                 null
             }
@@ -225,9 +223,7 @@ object ScriptUtils {
                 "/system/bin/frida"
             )
             candidates.firstOrNull { path ->
-                val result = RootUtils.executeSuCommand("ls $path")
-                result.contains(path.substringAfterLast("/")) &&
-                        !result.contains("No such file")
+                RootUtils.exec("[ -x ${ShellUtils.quote(path)} ]").isSuccess
             }
         }
     }
@@ -248,9 +244,10 @@ object ScriptUtils {
     ): String {
         return withContext(Dispatchers.IO) {
             try {
-                val cmd = "$fridaCliPath -U -f $packageName -l $scriptPath --no-pause"
-                val output = RootUtils.executeSuCommand(cmd)
-                output.ifEmpty { "Command executed (no output captured)" }
+                val cmd = listOf(fridaCliPath, "-U", "-f", packageName, "-l", scriptPath, "--no-pause")
+                    .joinToString(" ") { ShellUtils.quote(it) }
+                val result = RootUtils.exec(cmd)
+                (result.stdout + result.stderr).trim().ifEmpty { "Command executed (no output captured)" }
             } catch (e: Exception) {
                 "ERROR: ${e.message}"
             }

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.hackpuntes.fridagate.utils.FridaUtils
 import com.hackpuntes.fridagate.utils.FridaUtils.FridaRelease
 import com.hackpuntes.fridagate.utils.RootUtils
+import com.hackpuntes.fridagate.utils.ShellUtils
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -282,25 +283,31 @@ class FridaViewModel : ViewModel() {
     /**
      * Starts frida-server with custom command-line flags.
      *
-     * Sanitizes the input first to remove shell injection characters
-     * like ; | & $ which could be used to run arbitrary commands.
+     * Nothing is stripped from the input: FridaUtils splits it into arguments and
+     * quotes each one, so characters like ; | $ reach frida-server as plain text
+     * and can't run extra commands.
      *
      * @param flags Raw flags string entered by the user
      */
     fun startServerWithCustomFlags(flags: String) {
-        // Remove potentially dangerous shell characters before passing to su
-        val sanitized = flags.replace(Regex("[;&|<>$`\\\\]"), "").trim()
-        _lastCustomFlags.value = sanitized
+        val trimmed = flags.trim()
+        try {
+            ShellUtils.splitArgs(trimmed)
+        } catch (e: IllegalArgumentException) {
+            addLog("ERROR: Invalid flags — ${e.message}")
+            return
+        }
+        _lastCustomFlags.value = trimmed
 
         viewModelScope.launch {
             _isLoading.value = true
-            addLog("Starting frida-server with flags: $sanitized")
+            addLog("Starting frida-server with flags: $trimmed")
 
-            val started = FridaUtils.startFridaServerWithFlags(sanitized)
+            val started = FridaUtils.startFridaServerWithFlags(trimmed)
 
             if (started) {
                 _isServerRunning.value = true
-                addLog("Frida server started with flags: $sanitized")
+                addLog("Frida server started with flags: $trimmed")
             } else {
                 addLog("ERROR: Failed to start frida-server with flags")
             }

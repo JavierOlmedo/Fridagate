@@ -405,7 +405,8 @@ object FridaUtils {
      *
      * Steps:
      *  1. Copy the file from our app's private directory to /data/local/tmp/
-     *  2. Set permissions to 755 (owner can read/write/execute, others can read/execute)
+     *     (needs root: the app can't write there directly)
+     *  2. chmod 755 so Android can execute it
      *  3. Save the version number to a text file for later display
      *
      * @param fridaFile The downloaded binary file (in the app's private directory)
@@ -414,23 +415,13 @@ object FridaUtils {
      */
     suspend fun installFridaServer(fridaFile: File, version: String): Boolean {
         return withContext(Dispatchers.IO) {
-            try {
-                // Copy the binary to /data/local/tmp/ — needs root because our app
-                // doesn't have direct write access to /data/local/tmp/
-                RootUtils.executeSuCommand("cp ${fridaFile.absolutePath} $FRIDA_BINARY_PATH")
+            val copy = RootUtils.exec(
+                "cp ${ShellUtils.quote(fridaFile.absolutePath)} $FRIDA_BINARY_PATH && chmod 755 $FRIDA_BINARY_PATH"
+            )
+            if (!copy.isSuccess) return@withContext false
 
-                // chmod 755: sets execute permissions so Android can run the binary
-                // 7 = rwx (owner), 5 = r-x (group), 5 = r-x (others)
-                RootUtils.executeSuCommand("chmod 755 $FRIDA_BINARY_PATH")
-
-                // Save the version to a text file so we can display it later
-                saveInstalledVersion(version)
-
-                // Verify the installation by checking if the file exists
-                return@withContext isFridaServerInstalled()
-            } catch (e: Exception) {
-                return@withContext false
-            }
+            saveInstalledVersion(version)
+            isFridaServerInstalled()
         }
     }
 
@@ -443,13 +434,7 @@ object FridaUtils {
      */
     suspend fun saveInstalledVersion(version: String): Boolean {
         return withContext(Dispatchers.IO) {
-            try {
-                // "echo 'text' > file" writes text to a file, overwriting existing content
-                RootUtils.executeSuCommand("echo '$version' > $FRIDA_VERSION_FILE")
-                true
-            } catch (e: Exception) {
-                false
-            }
+            RootUtils.exec("printf '%s\\n' ${ShellUtils.quote(version)} > $FRIDA_VERSION_FILE").isSuccess
         }
     }
 
@@ -460,19 +445,8 @@ object FridaUtils {
      */
     suspend fun getInstalledFridaVersion(): String? {
         return withContext(Dispatchers.IO) {
-            try {
-                // First check if the version file exists
-                val checkResult = RootUtils.executeSuCommand("ls -la $FRIDA_VERSION_FILE")
-                if (!checkResult.contains(FRIDA_VERSION_FILE) || checkResult.contains("No such file")) {
-                    return@withContext null
-                }
-
-                // Read the contents of the version file
-                val versionResult = RootUtils.executeSuCommand("cat $FRIDA_VERSION_FILE")
-                if (versionResult.isNotEmpty()) versionResult.trim() else null
-            } catch (e: Exception) {
-                null
-            }
+            val result = RootUtils.exec("cat $FRIDA_VERSION_FILE")
+            if (result.isSuccess) result.stdout.trim().ifEmpty { null } else null
         }
     }
 
@@ -491,79 +465,53 @@ object FridaUtils {
     /**
      * Starts frida-server with optional command-line flags.
      *
-     * Uses "nohup ... &" to run the process in the background:
-     *  - nohup: keeps the process running even if the shell session ends
-     *  - > /dev/null 2>&1: discards stdout and stderr output
-     *  - &: runs the command in the background (non-blocking)
+     * The flags are split into arguments (ShellUtils.splitArgs) and every argument is
+     * quoted, so whatever the user types is passed to frida-server as data and can't
+     * run extra commands.
      *
-     * @param flags Extra flags to pass to frida-server (e.g., "-l 0.0.0.0:27042")
-     * @return true if the server is running after the start attempt
+     *  - nohup: keeps the process running after the shell that started it exits
+     *  - </dev/null >/dev/null 2>&1: detaches it from the root shell's input and output
+     *  - &: runs it in the background (non-blocking)
+     *
+     * @param flags Extra flags for frida-server (e.g., "-l 0.0.0.0:27042 --token=secret")
+     * @return true if the server is running after the start attempt,
+     *         false if it isn't or [flags] has an unclosed quote
      */
     suspend fun startFridaServerWithFlags(flags: String): Boolean {
+        val args = try {
+            ShellUtils.splitArgs(flags).joinToString("") { " " + ShellUtils.quote(it) }
+        } catch (e: IllegalArgumentException) {
+            return false
+        }
         return withContext(Dispatchers.IO) {
-            try {
-                // Don't start a second instance if it's already running
-                if (isFridaServerRunning()) return@withContext true
+            // Don't start a second instance if it's already running
+            if (isFridaServerRunning()) return@withContext true
 
-                val command = if (flags.isBlank()) {
-                    "nohup $FRIDA_BINARY_PATH > /dev/null 2>&1 &"
-                } else {
-                    "nohup $FRIDA_BINARY_PATH $flags > /dev/null 2>&1 &"
-                }
+            RootUtils.exec("nohup $FRIDA_BINARY_PATH$args </dev/null >/dev/null 2>&1 &")
 
-                RootUtils.executeSuCommand(command)
-
-                // Wait 1.5 seconds for the server to fully initialize
-                Thread.sleep(1500)
-
-                // Verify that the server is actually running now
-                return@withContext isFridaServerRunning()
-            } catch (e: Exception) {
-                return@withContext false
-            }
+            // Wait 1.5 seconds for the server to fully initialize, then verify it is up
+            Thread.sleep(1500)
+            isFridaServerRunning()
         }
     }
 
     /**
-     * Stops the frida-server process using multiple kill strategies.
+     * Stops every frida-server process.
      *
-     * Different Android versions and ROMs use different process tools,
-     * so we try multiple approaches until one works:
-     *  1. kill -9 with ps -A (modern Android)
-     *  2. kill -9 with pidof (standard Linux)
-     *  3. kill -9 with ps (older Android)
-     *  4. pkill -f (final fallback)
+     * pidof finds the processes by name and kill -9 (SIGKILL, can't be ignored)
+     * ends them. killall is a fallback for unusual toolsets.
      *
-     * kill -9 = SIGKILL = force kill, cannot be ignored by the process
-     *
-     * @return true if the server was stopped successfully
+     * @return true if no frida-server process is left
      */
     suspend fun stopFridaServer(): Boolean {
         return withContext(Dispatchers.IO) {
-            try {
-                // Strategy 1: modern Android (API 26+) uses "ps -A"
-                RootUtils.executeSuCommand("kill -9 \$(ps -A | grep frida-server | awk '{ print \$2 }')")
-                Thread.sleep(500)
-                if (!isFridaServerRunning()) return@withContext true
+            RootUtils.exec("pids=\$(pidof frida-server) && kill -9 \$pids")
+            Thread.sleep(300)
+            if (!isFridaServerRunning()) return@withContext true
 
-                // Strategy 2: use pidof to get the PID directly
-                RootUtils.executeSuCommand("kill -9 \$(pidof frida-server)")
-                Thread.sleep(300)
-                if (!isFridaServerRunning()) return@withContext true
-
-                // Strategy 3: older Android uses "ps" without "-A"
-                RootUtils.executeSuCommand("kill -9 \$(ps | grep frida-server | awk '{ print \$2 }')")
-                Thread.sleep(300)
-                if (!isFridaServerRunning()) return@withContext true
-
-                // Strategy 4: pkill matches by process name pattern
-                RootUtils.executeSuCommand("pkill -9 -f frida-server")
-                Thread.sleep(500)
-
-                return@withContext !isFridaServerRunning()
-            } catch (e: Exception) {
-                return@withContext false
-            }
+            RootUtils.exec("killall -9 frida-server")
+            Thread.sleep(500)
+            !isFridaServerRunning()
         }
     }
 
@@ -574,48 +522,23 @@ object FridaUtils {
     /**
      * Checks whether the frida-server binary is installed on the device.
      *
-     * Runs "ls -la" on the binary path and checks for the file in the output.
-     * If the file doesn't exist, "ls" returns a "No such file" error message.
-     *
      * @return true if the binary exists at FRIDA_BINARY_PATH
      */
     suspend fun isFridaServerInstalled(): Boolean {
         return withContext(Dispatchers.IO) {
-            try {
-                val result = RootUtils.executeSuCommand("ls -la $FRIDA_BINARY_PATH")
-                result.contains(FRIDA_BINARY_PATH) && !result.contains("No such file")
-            } catch (e: Exception) {
-                false
-            }
+            RootUtils.exec("[ -f $FRIDA_BINARY_PATH ]").isSuccess
         }
     }
 
     /**
      * Checks whether the frida-server process is currently running.
-     *
-     * Tries multiple process listing commands for compatibility across Android versions.
+     * pidof exits with 0 only when at least one process matches.
      *
      * @return true if a frida-server process is found
      */
     suspend fun isFridaServerRunning(): Boolean {
         return withContext(Dispatchers.IO) {
-            try {
-                // Try "ps -A" first (modern Android)
-                var result = RootUtils.executeSuCommand("ps -A | grep frida-server")
-                if (result.contains("frida-server")) return@withContext true
-
-                // Try "ps" without -A (older Android)
-                result = RootUtils.executeSuCommand("ps | grep frida-server")
-                if (result.contains("frida-server")) return@withContext true
-
-                // Try pidof: returns the PID if the process exists, empty if not
-                result = RootUtils.executeSuCommand("pidof frida-server")
-                if (result.trim().isNotEmpty()) return@withContext true
-
-                false
-            } catch (e: Exception) {
-                false
-            }
+            RootUtils.exec("pidof frida-server").isSuccess
         }
     }
 
@@ -628,22 +551,9 @@ object FridaUtils {
      */
     suspend fun uninstallFridaServer(): Boolean {
         return withContext(Dispatchers.IO) {
-            try {
-                // Stop the server before removing the binary
-                if (isFridaServerRunning()) stopFridaServer()
-
-                // Remove the binary and the version file
-                // "rm -f" removes without error if the file doesn't exist
-                RootUtils.executeSuCommand("rm -f $FRIDA_BINARY_PATH")
-                RootUtils.executeSuCommand("rm -f $FRIDA_VERSION_FILE")
-
-                // Verify removal: if the file is gone, uninstall was successful
-                val result = RootUtils.executeSuCommand("ls -la $FRIDA_BINARY_PATH")
-                val stillExists = result.contains(FRIDA_BINARY_PATH) && !result.contains("No such file")
-                return@withContext !stillExists
-            } catch (e: Exception) {
-                false
-            }
+            if (isFridaServerRunning()) stopFridaServer()
+            RootUtils.exec("rm -f $FRIDA_BINARY_PATH $FRIDA_VERSION_FILE")
+            !isFridaServerInstalled()
         }
     }
 
@@ -652,25 +562,25 @@ object FridaUtils {
     // -------------------------------------------------------------------------
 
     /**
-     * Returns the CPU architecture of the current device.
+     * Returns the CPU architecture name used in Frida's release files.
      *
-     * Android devices can have different CPU architectures:
-     *  - arm64-v8a → modern 64-bit ARM (most phones since 2015)
-     *  - armeabi-v7a → older 32-bit ARM
+     * Build.SUPPORTED_ABIS lists the ABIs the device can run, preferred first.
+     * We take the first one Frida ships a build for:
+     *  - arm64-v8a → arm64 (most phones since 2015)
+     *  - armeabi-v7a / armeabi → arm (older 32-bit ARM)
      *  - x86_64 / x86 → emulators and some Intel devices
      *
-     * Build.SUPPORTED_ABIS[0] returns the most preferred ABI for this device.
-     * We map it to the architecture name used in Frida's release filenames.
-     *
-     * @return Architecture string: "arm64", "arm", "x86_64", or "x86"
+     * @return "arm64", "arm", "x86_64" or "x86" (arm64 if nothing matches)
      */
-    fun getDeviceArchitecture(): String {
-        return when (Build.SUPPORTED_ABIS[0]) {
-            "arm64-v8a"   -> "arm64"
-            "armeabi-v7a" -> "arm"
-            "x86_64"      -> "x86_64"
-            "x86"         -> "x86"
-            else          -> "arm" // Default fallback for unknown architectures
-        }
+    fun getDeviceArchitecture(): String =
+        Build.SUPPORTED_ABIS.firstNotNullOfOrNull { fridaArchForAbi(it) } ?: "arm64"
+
+    /** Maps an Android ABI name to Frida's architecture name, or null if Frida has no build for it */
+    internal fun fridaArchForAbi(abi: String): String? = when (abi) {
+        "arm64-v8a" -> "arm64"
+        "armeabi-v7a", "armeabi" -> "arm"
+        "x86_64" -> "x86_64"
+        "x86" -> "x86"
+        else -> null
     }
 }

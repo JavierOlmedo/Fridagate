@@ -30,18 +30,12 @@ object FridaInjectUtils {
     // -------------------------------------------------------------------------
 
     suspend fun isFridaInjectInstalled(): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val r = RootUtils.executeSuCommand("ls $INJECT_BINARY_PATH")
-            r.contains("frida-inject") && !r.contains("No such file")
-        } catch (e: Exception) { false }
+        RootUtils.exec("[ -f $INJECT_BINARY_PATH ]").isSuccess
     }
 
     suspend fun getInstalledVersion(): String? = withContext(Dispatchers.IO) {
-        try {
-            val check = RootUtils.executeSuCommand("ls $INJECT_VERSION_FILE")
-            if (check.contains("No such file")) return@withContext null
-            RootUtils.executeSuCommand("cat $INJECT_VERSION_FILE").trim().ifEmpty { null }
-        } catch (e: Exception) { null }
+        val result = RootUtils.exec("cat $INJECT_VERSION_FILE")
+        if (result.isSuccess) result.stdout.trim().ifEmpty { null } else null
     }
 
     // -------------------------------------------------------------------------
@@ -51,6 +45,8 @@ object FridaInjectUtils {
     suspend fun downloadAndInstall(context: Context, version: String): Boolean =
         withContext(Dispatchers.IO) {
             try {
+                // The version ends up in a URL and in a shell command
+                if (!FridaUtils.isValidVersionFormat(version)) return@withContext false
                 val arch = FridaUtils.getDeviceArchitecture()
                 val url  = "https://github.com/frida/frida/releases/download/$version/" +
                            "frida-inject-$version-android-$arch.xz"
@@ -63,12 +59,14 @@ object FridaInjectUtils {
                 downloaded.renameTo(injectFile)
                 injectFile.setExecutable(true)
 
-                RootUtils.executeSuCommand("cp ${injectFile.absolutePath} $INJECT_BINARY_PATH")
-                RootUtils.executeSuCommand("chmod 755 $INJECT_BINARY_PATH")
-                RootUtils.executeSuCommand("echo '$version' > $INJECT_VERSION_FILE")
+                val install = RootUtils.exec(
+                    "cp ${ShellUtils.quote(injectFile.absolutePath)} $INJECT_BINARY_PATH" +
+                        " && chmod 755 $INJECT_BINARY_PATH" +
+                        " && printf '%s\\n' ${ShellUtils.quote(version)} > $INJECT_VERSION_FILE"
+                )
 
                 try { injectFile.delete() } catch (_: Exception) {}
-                isFridaInjectInstalled()
+                install.isSuccess && isFridaInjectInstalled()
             } catch (e: Exception) { false }
         }
 
@@ -98,6 +96,10 @@ object FridaInjectUtils {
         packageName: String
     ): List<String> = withContext(Dispatchers.IO) {
         val lines = mutableListOf<String>()
+        if (!InputValidator.isValidPackageName(packageName)) {
+            return@withContext listOf("ERROR: '$packageName' is not a valid package name")
+        }
+        val pkg = ShellUtils.quote(packageName)
 
         try {
             // Step 1: save scripts and build the path to pass to frida-inject
@@ -118,25 +120,27 @@ object FridaInjectUtils {
                 val tmpFile = File(context.filesDir, "fridagate_combined.js")
                 tmpFile.writeText(combined)
                 val dest = "/data/local/tmp/fridagate_combined.js"
-                RootUtils.executeSuCommand("cp ${tmpFile.absolutePath} $dest")
-                RootUtils.executeSuCommand("chmod 644 $dest")
+                val copy = RootUtils.exec("cp ${ShellUtils.quote(tmpFile.absolutePath)} $dest && chmod 644 $dest")
                 tmpFile.delete()
+                if (!copy.isSuccess) {
+                    return@withContext listOf("ERROR: Could not save combined script: ${copy.errorMessage}")
+                }
                 scripts.forEach { lines += "Saved ${it.fileName}" }
                 lines += "Combined into fridagate_combined.js"
                 dest
             }
 
             // Step 2: kill existing instance
-            RootUtils.executeSuCommand("am force-stop $packageName")
+            RootUtils.exec("am force-stop $pkg")
             Thread.sleep(600)
             lines += "Stopped $packageName"
 
             // Step 3: clear previous log
-            RootUtils.executeSuCommand("rm -f $INJECT_LOG")
+            RootUtils.exec("rm -f $INJECT_LOG")
 
             // Step 4: spawn with frida-inject in its own independent su process.
             //
-            // WHY NOT RootUtils.executeSuCommand():
+            // WHY NOT RootUtils.exec():
             //   RootUtils keeps a persistent su shell. Backgrounding frida-inject (&) inside
             //   that shell makes it a child job — it can receive SIGHUP when the shell resets
             //   state, and job-control semantics vary by Android shell implementation.
@@ -147,7 +151,7 @@ object FridaInjectUtils {
             //   We don't call waitFor() so it runs for the lifetime of the target app.
             //
             // frida-inject --eternalize: keep the script alive even after frida-inject exits
-            val injectCmd = "$INJECT_BINARY_PATH -f $packageName -s $scriptPath -e > $INJECT_LOG 2>&1 &"
+            val injectCmd = "$INJECT_BINARY_PATH -f $pkg -s ${ShellUtils.quote(scriptPath)} -e > $INJECT_LOG 2>&1 &"
             try {
                 Runtime.getRuntime().exec(arrayOf("su", "-c", injectCmd))
                 // Intentionally no waitFor() — frida-inject stays attached to the target process
@@ -158,7 +162,7 @@ object FridaInjectUtils {
 
             // Step 5: wait for frida-inject to spawn and inject, then read output
             Thread.sleep(4000)
-            val injectLog = RootUtils.executeSuCommand("cat $INJECT_LOG").trim()
+            val injectLog = RootUtils.exec("cat $INJECT_LOG").stdout.trim()
 
             if (injectLog.isNotEmpty()) {
                 lines += "frida-inject output:"
@@ -188,17 +192,16 @@ object FridaInjectUtils {
     private suspend fun attachByName(packageName: String, scriptPath: String): String {
         return withContext(Dispatchers.IO) {
             try {
-                RootUtils.executeSuCommand(
-                    "monkey -p $packageName -c android.intent.category.LAUNCHER 1"
-                )
+                val pkg = ShellUtils.quote(packageName)
+                RootUtils.exec("monkey -p $pkg -c android.intent.category.LAUNCHER 1")
                 Thread.sleep(1000)
 
-                RootUtils.executeSuCommand("rm -f $INJECT_LOG")
-                val attachCmd = "$INJECT_BINARY_PATH -n $packageName -s $scriptPath -e > $INJECT_LOG 2>&1 &"
+                RootUtils.exec("rm -f $INJECT_LOG")
+                val attachCmd = "$INJECT_BINARY_PATH -n $pkg -s ${ShellUtils.quote(scriptPath)} -e > $INJECT_LOG 2>&1 &"
                 Runtime.getRuntime().exec(arrayOf("su", "-c", attachCmd))
                 Thread.sleep(2500)
 
-                val log = RootUtils.executeSuCommand("cat $INJECT_LOG").trim()
+                val log = RootUtils.exec("cat $INJECT_LOG").stdout.trim()
                 val pid = findProcessId(packageName)
 
                 buildString {
@@ -217,12 +220,14 @@ object FridaInjectUtils {
      * since not all Android versions have `pidof`.
      */
     private fun findProcessId(packageName: String): String? {
+        val pkg = ShellUtils.quote(packageName)
+
         // Try pidof first (modern Android)
-        var pid = RootUtils.executeSuCommand("pidof $packageName").trim()
-        if (pid.isNotEmpty() && pid.all { it.isDigit() || it == ' ' }) return pid.trim()
+        val pid = RootUtils.exec("pidof $pkg").stdout.trim()
+        if (pid.isNotEmpty() && pid.all { it.isDigit() || it == ' ' }) return pid
 
         // Fall back to ps
-        val ps = RootUtils.executeSuCommand("ps -A | grep $packageName")
+        val ps = RootUtils.exec("ps -A | grep -F -- $pkg").stdout
         if (ps.isNotEmpty() && !ps.contains("grep")) {
             // ps output: USER PID PPID ...
             val parts = ps.trim().split("\\s+".toRegex())

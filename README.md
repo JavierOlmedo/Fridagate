@@ -4,7 +4,7 @@
   <img src="assets/fridagate-banner.png" alt="Fridagate Banner" width="100%"/>
   <p>Android pentesting toolkit - Frida server manager + Burp Suite proxy interceptor</p>
 
-  ![Version](https://img.shields.io/badge/version-1.0.1-brightgreen)
+  ![Version](https://img.shields.io/badge/version-1.0.2-brightgreen)
   ![Platform](https://img.shields.io/badge/platform-Android-green)
   ![Min SDK](https://img.shields.io/badge/minSDK-24-blue)
   ![License](https://img.shields.io/badge/license-MIT-orange)
@@ -58,9 +58,15 @@ Instead of running multiple ADB commands manually before each pentest session, F
 ### 🌐 Proxy
 
 - **iptables transparent proxy** - redirects all TCP traffic on ports 80/443 to Burp Suite regardless of app proxy settings
+  - Uses its own chains (`FRIDAGATE_*`): rules from VPNs, tethering or firewall apps are never flushed
+  - Blocks QUIC (UDP 443) and IPv6 web traffic so apps fall back to TCP over IPv4, which is what gets redirected
+  - Fridagate's own traffic (GitHub downloads) is excluded
 - **System proxy** - sets Android's global HTTP proxy for apps that respect it
 - One-tap connectivity test to verify Burp is reachable
 - Burp CA certificate installer (required for HTTPS interception)
+  - Works on Android 7 to 14+, including the Conscrypt APEX store introduced in Android 14
+  - No `/system` remount, no `curl` or `openssl` needed on the device
+  - Shows whether the CA Burp is serving right now is trusted by the system
 - Saves Burp IP and port settings across sessions
 
 ### 🧪 Extras *(experimental)*
@@ -86,8 +92,9 @@ Instead of running multiple ADB commands manually before each pentest session, F
 ### 1. Configure Burp Suite
 
 1. Open Burp Suite on your PC
-2. Go to `Proxy → Options → Add` and create a listener on `0.0.0.0:8080`
-3. Note your PC's local IP address (e.g., `192.168.100.224`)
+2. Go to `Proxy → Proxy settings → Proxy listeners` and add a listener on `0.0.0.0:8080` (all interfaces)
+3. Edit the listener and, in `Request handling`, enable **Support invisible proxying**. The iptables mode redirects traffic without the app knowing, so Burp has to work as a transparent proxy
+4. Note your PC's local IP address (e.g., `192.168.100.224`)
 
 ### 2. Install Frida Server
 
@@ -120,9 +127,11 @@ Instead of running multiple ADB commands manually before each pentest session, F
 
 ### 5. Install Burp's CA Certificate *(for HTTPS)*
 
-1. Make sure the system proxy is enabled (Proxy tab)
+1. Make sure Burp is reachable (Proxy tab → **Test**)
 2. Tap **Install Burp CA Certificate**
-3. Reboot the device for all apps to recognize the certificate
+3. Restart (force-stop) the target apps so they load the new trust store
+
+> The CA is added with an in-memory overlay of the system store, so it does **not** survive a reboot: install it again after every reboot. The Proxy tab shows whether the CA is currently trusted.
 
 ## 🏗️ Architecture
 
@@ -141,17 +150,31 @@ Fridagate is built with modern Android development practices:
 ```text
 Android App
     │
-    ▼  (port 80 / 443)
-iptables NAT (DNAT rule)
+    ▼  (TCP 80 / 443)
+iptables nat OUTPUT → FRIDAGATE_OUT (DNAT)
     │
     ▼  redirected transparently
-Burp Suite Proxy (192.168.100.224:8080)
+Burp Suite Proxy (192.168.100.224:8080, invisible proxying)
     │
     ▼  decrypts with its CA cert
 Internet
 ```
 
-The iptables DNAT rules intercept outgoing TCP packets destined for ports 80 and 443 and rewrite their destination to Burp Suite's IP and port - without the app knowing. This works even for apps that explicitly disable proxy support.
+The DNAT rules in the `FRIDAGATE_OUT` chain rewrite the destination of outgoing TCP connections to ports 80 and 443 to Burp Suite's IP and port, without the app knowing. This works even for apps that explicitly disable proxy support.
+
+Traffic that a TCP redirect can't catch is blocked so that apps fall back to a path that is redirected:
+
+- **QUIC / HTTP3** (UDP 443) is rejected, so apps retry over TCP.
+- **IPv6** web traffic is rejected, so apps retry over IPv4. An IPv4 Burp can't be the DNAT target of an IPv6 connection.
+
+Disabling the proxy only removes Fridagate's own chains and jump rules, plus the rules left by Fridagate 1.0.x.
+
+## 🔑 How the CA Install Works
+
+1. Burp's CA is downloaded from `http://<burp-ip>:<port>/cert` inside the app, and its Android file name (`subject_hash_old`, e.g. `9a5ba575.0`) is computed in Kotlin.
+2. A tmpfs is mounted over `/system/etc/security/cacerts`, holding the currently trusted CAs plus Burp's. This runs in the global mount namespace (`su --mount-master`, or `nsenter` into init) so every app sees it.
+3. On Android 14+, CAs are read from the Conscrypt APEX (`/apex/com.android.conscrypt/cacerts`), which is mounted per process. The overlay is bind-mounted over it inside zygote, which covers every app launched afterwards, and inside every running app.
+4. The file is read back the way apps see it and compared with Burp's CA.
 
 ## ⚠️ Disclaimer
 

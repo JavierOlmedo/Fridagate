@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hackpuntes.fridagate.utils.FridaInjectUtils
 import com.hackpuntes.fridagate.utils.FridaUtils
+import com.hackpuntes.fridagate.utils.InputValidator
 import com.hackpuntes.fridagate.utils.ScriptUtils
 import com.hackpuntes.fridagate.utils.ScriptUtils.BypassScript
 import kotlinx.coroutines.Dispatchers
@@ -105,6 +106,10 @@ class ExtrasViewModel(private val context: Context) : ViewModel() {
         val pkg = _targetPackage.value.trim()
         if (pkg.isEmpty()) {
             addLog("ERROR: Enter a target package name (e.g. com.target.app)")
+            return
+        }
+        if (!InputValidator.isValidPackageName(pkg)) {
+            addLog("ERROR: '$pkg' is not a valid package name")
             return
         }
         if (!_isFridaInjectInstalled.value) {

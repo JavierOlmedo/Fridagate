@@ -1,166 +1,331 @@
 package com.hackpuntes.fridagate.utils
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+import java.io.IOException
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.io.Writer
+import java.util.UUID
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+
 /**
- * RootUtils - Utility object for executing root (superuser) commands.
+ * RootUtils - Runs shell commands as root through one persistent "su" shell.
  *
- * On Android, regular apps run in a sandboxed environment and cannot
- * execute privileged operations. A rooted device has the "su" (superuser)
- * binary installed, which allows running commands as root (uid=0).
+ * How a command runs:
+ *  1. It is wrapped as  sh -c '<command>' </dev/null  and written to the shell's stdin,
+ *     followed by  echo "<marker> $?"  and  echo <marker> >&2
+ *  2. Two reader threads drain the shell's stdout and stderr all the time, line by line.
+ *  3. We collect stdout up to the marker (which also carries the exit code) and stderr up
+ *     to its marker. The marker is a random UUID per command, so it can't clash with output.
  *
- * This object is used by both FridaUtils and ProxyUtils, so it lives
- * here as a shared utility instead of being duplicated in each module.
+ * Why it is built this way:
+ *  - No sleeps: we know exactly when a command ends and what its exit code is.
+ *  - stderr is captured, so real error messages can be shown in the UI.
+ *  - The readers never stop, so a command that writes a lot can't block on a full pipe.
+ *  - sh -c isolates each command: a syntax error or an "exit" can't kill the shared shell,
+ *    and </dev/null stops a command from swallowing the next one from our stdin.
+ *  - Calls are serialized with a lock, so concurrent coroutines never mix their output.
+ *  - Every command has a timeout. On timeout the shell is killed and the next call opens a new one.
  *
- * How it works:
- *   1. We start a persistent "su" process once (getSuProcess)
- *   2. We send commands to it by writing to its stdin (input stream)
- *   3. We read the output from its stdout (output stream)
- *   4. When done, we close the process (closeSuProcess)
+ * The shell is opened with "su --mount-master" when the root manager supports it (Magisk,
+ * KernelSU, SuperSU), which puts it in the global mount namespace: mounts made from it
+ * (the CA store overlay) are seen by every app, not only inside Fridagate. Plain "su" is
+ * the fallback.
  *
- * Why a persistent process instead of a new one per command?
- *   Starting a new "su" process for every command is slow because
- *   it requires user approval each time on some root managers (e.g. Magisk).
- *   A persistent process only asks once.
+ * Background jobs started from here (nohup ... &) must redirect their stdout and stderr,
+ * otherwise their output could end up mixed with the output of later commands.
  */
 object RootUtils {
 
-    // The persistent "su" process — null if not yet started or already closed
-    private var suProcess: Process? = null
+    /**
+     * Result of a root command.
+     *
+     * @param exitCode exit status of the command, or [TIMEOUT] / [NO_ROOT]
+     * @param stdout   everything the command printed on stdout
+     * @param stderr   everything the command printed on stderr
+     */
+    data class Result(val exitCode: Int, val stdout: String, val stderr: String) {
+        val isSuccess: Boolean get() = exitCode == 0
 
-    // The output stream of the su process (we write commands here)
-    private var suOutputStream: java.io.OutputStream? = null
+        /** Best text to show when the command failed */
+        val errorMessage: String
+            get() = stderr.trim().ifEmpty { stdout.trim() }.ifEmpty { "exit code $exitCode" }
+
+        companion object {
+            /** The command didn't finish in time, or the shell died while it ran */
+            const val TIMEOUT = -1
+
+            /** No root shell could be opened (no su binary, or access denied) */
+            const val NO_ROOT = -2
+        }
+    }
+
+    /** Default per-command timeout */
+    const val DEFAULT_TIMEOUT_MS = 30_000L
 
     /**
-     * Checks whether the device has root access available.
-     *
-     * Runs "su -c id" and looks for "uid=0" in the output.
-     * "id" is a standard Unix command that prints the current user's identity.
-     * If the user is root, it returns something like "uid=0(root) gid=0(root)".
-     *
-     * @return true if root is available, false otherwise
+     * How long we wait for "id -u" when opening the shell. Long on purpose: it includes
+     * the time the user needs to tap "Grant" in the root manager prompt.
      */
-    fun isRootAvailable(): Boolean {
+    private const val OPEN_TIMEOUT_MS = 45_000L
+
+    private val shell = PersistentShell(
+        candidates = listOf(listOf("su", "--mount-master"), listOf("su")),
+        openTimeoutMs = OPEN_TIMEOUT_MS,
+        isAcceptable = { idResult -> idResult.isSuccess && idResult.stdout.trim() == "0" }
+    )
+
+    /**
+     * Runs [command] as root and returns its exit code, stdout and stderr. Never throws.
+     * Blocking: call it from Dispatchers.IO.
+     */
+    fun exec(command: String, timeoutMs: Long = DEFAULT_TIMEOUT_MS): Result =
+        shell.exec(command, timeoutMs)
+
+    /**
+     * True if a root shell can be opened and it really runs as uid 0.
+     * The first call may show the root manager's permission prompt.
+     */
+    suspend fun isRootAvailable(): Boolean = withContext(Dispatchers.IO) { shell.canOpen() }
+
+    /** True if the open root shell runs in the global mount namespace (su --mount-master) */
+    val isGlobalMountNamespace: Boolean
+        get() = shell.openedWith?.contains("--mount-master") == true
+
+    /**
+     * Closes the root shell; the next command opens a new one.
+     * Never blocks: if a command is running, the shell is left open.
+     */
+    fun closeSuProcess() = shell.close()
+}
+
+/**
+ * Keeps one long-lived shell and runs commands on it, one at a time.
+ * RootUtils uses it with su; unit tests use it with a plain sh.
+ *
+ * @param candidates   command lines tried in order to open the shell
+ * @param openTimeoutMs how long to wait for the first "id -u" on a new shell
+ * @param isAcceptable decides from the "id -u" result whether the new shell is usable
+ */
+internal class PersistentShell(
+    private val candidates: List<List<String>>,
+    private val openTimeoutMs: Long,
+    private val isAcceptable: (RootUtils.Result) -> Boolean
+) {
+    private val lock = ReentrantLock()
+    private var session: ShellSession? = null
+
+    /** Command line of the open shell, e.g. [su, --mount-master]. Null when no shell is open. */
+    @Volatile
+    var openedWith: List<String>? = null
+        private set
+
+    fun exec(command: String, timeoutMs: Long): RootUtils.Result {
+        lock.withLock {
+            val current = openSession()
+                ?: return RootUtils.Result(RootUtils.Result.NO_ROOT, "", "root shell not available")
+            val result = current.run(command, timeoutMs)
+            if (result == null) {
+                // Timed out or the shell died: drop it, the next call opens a fresh one
+                closeLocked()
+                return RootUtils.Result(
+                    RootUtils.Result.TIMEOUT, "",
+                    "no answer after $timeoutMs ms (timed out or the shell died)"
+                )
+            }
+            return result
+        }
+    }
+
+    fun canOpen(): Boolean = lock.withLock { openSession() != null }
+
+    /**
+     * Closes the shell without waiting: it can be called from the main thread
+     * (ViewModel.onCleared). If a command is running, the shell is left open.
+     */
+    fun close() {
+        if (!lock.tryLock()) return
+        try {
+            closeLocked()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    private fun closeLocked() {
+        session?.destroy()
+        session = null
+        openedWith = null
+    }
+
+    private fun openSession(): ShellSession? {
+        session?.let { if (it.isAlive()) return it }
+        closeLocked()
+        for (candidate in candidates) {
+            val newSession = ShellSession.start(candidate) ?: continue
+            val idResult = newSession.run("id -u", openTimeoutMs)
+            if (idResult != null && isAcceptable(idResult)) {
+                session = newSession
+                openedWith = candidate
+                return newSession
+            }
+            // Still running but silent: the user never answered the root prompt.
+            // Trying the next candidate would only show the prompt again.
+            val ignoredPrompt = idResult == null && newSession.isAlive()
+            newSession.destroy()
+            if (ignoredPrompt) break
+        }
+        return null
+    }
+}
+
+/**
+ * One running shell process plus the two threads that read its output.
+ * Not thread-safe on its own: PersistentShell serializes access.
+ */
+internal class ShellSession private constructor(private val process: Process) {
+
+    private val stdin: Writer = OutputStreamWriter(process.outputStream, Charsets.UTF_8)
+    private val stdoutLines = LinkedBlockingQueue<Any>()
+    private val stderrLines = LinkedBlockingQueue<Any>()
+
+    @Volatile
+    private var dead = false
+
+    init {
+        startReader(process.inputStream, stdoutLines, "fridagate-shell-stdout")
+        startReader(process.errorStream, stderrLines, "fridagate-shell-stderr")
+    }
+
+    fun isAlive(): Boolean {
+        if (dead) return false
         return try {
-            // Start a new process running "su -c id"
-            // "-c id" means: run the "id" command as superuser
-            val process = Runtime.getRuntime().exec("su -c id")
-
-            // Wait for the process to finish and get its exit code
-            // Exit code 0 = success, anything else = failure
-            val exitCode = process.waitFor()
-
-            // Read all output from the process
-            val output = process.inputStream.bufferedReader().readText()
-
-            // Root is available if the command succeeded AND output contains uid=0
-            exitCode == 0 && output.contains("uid=0")
-        } catch (e: Exception) {
-            // If "su" doesn't exist or any other error occurs, root is not available
+            process.exitValue()
             false
+        } catch (e: IllegalThreadStateException) {
+            true
         }
     }
 
     /**
-     * Returns the active su process, creating it if it doesn't exist yet.
-     *
-     * This implements a simple singleton pattern for the process:
-     * - First call: creates the process and stores it
-     * - Subsequent calls: returns the existing process
-     *
-     * @return Pair of (Process, OutputStream) or null if su is not available
+     * Runs one command and waits for it.
+     * Returns null if it didn't finish within [timeoutMs] or the shell died;
+     * the caller must then destroy this session.
      */
-    private fun getSuProcess(): Pair<Process, java.io.OutputStream>? {
-        // If we already have a running process, return it directly
-        if (suProcess != null && suOutputStream != null) {
-            return Pair(suProcess!!, suOutputStream!!)
+    fun run(command: String, timeoutMs: Long): RootUtils.Result? {
+        if (!discardStaleOutput()) return null
+        val marker = "__FRIDAGATE_" + UUID.randomUUID().toString().replace("-", "")
+        try {
+            stdin.write("sh -c ${ShellUtils.quote(command)} </dev/null\n")
+            stdin.write("echo \"$marker \$?\"\n")
+            stdin.write("echo $marker >&2\n")
+            stdin.flush()
+        } catch (e: IOException) {
+            dead = true
+            return null
         }
 
-        return try {
-            // Start the "su" shell — this opens an interactive root shell
-            val process = Runtime.getRuntime().exec("su")
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        val stdout = StringBuilder()
+        val exitText = readUntilMarker(stdoutLines, marker, stdout, deadline) ?: return null
+        val stderr = StringBuilder()
+        readUntilMarker(stderrLines, marker, stderr, deadline) ?: return null
 
-            // Get the stream where we write commands (process's stdin)
-            val outputStream = process.outputStream
+        val exitCode = exitText.trim().toIntOrNull() ?: 255
+        return RootUtils.Result(exitCode, stdout.toString(), stderr.toString())
+    }
 
-            // Store references so we can reuse them in future calls
-            suProcess = process
-            suOutputStream = outputStream
+    /**
+     * Moves lines from [queue] into [into] until one contains [marker].
+     * Text before the marker on that line is output that had no trailing newline.
+     *
+     * @return the text after the marker (the exit code, on stdout), or null on timeout / EOF
+     */
+    private fun readUntilMarker(
+        queue: LinkedBlockingQueue<Any>,
+        marker: String,
+        into: StringBuilder,
+        deadline: Long
+    ): String? {
+        while (true) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) return null
+            val item = queue.poll(remaining, TimeUnit.NANOSECONDS) ?: return null
+            if (item === EOF) {
+                dead = true
+                return null
+            }
+            val line = item as String
+            val index = line.indexOf(marker)
+            if (index >= 0) {
+                into.append(line, 0, index)
+                return line.substring(index + marker.length)
+            }
+            into.append(line).append('\n')
+        }
+    }
 
-            Pair(process, outputStream)
-        } catch (e: Exception) {
-            // If "su" binary is not found or fails to start
+    /**
+     * Drops output that arrived between commands (e.g. from a background job).
+     * Returns false if the shell has exited.
+     */
+    private fun discardStaleOutput(): Boolean {
+        for (queue in listOf(stdoutLines, stderrLines)) {
+            while (true) {
+                val item = queue.poll() ?: break
+                if (item === EOF) dead = true
+            }
+        }
+        return !dead
+    }
+
+    fun destroy() {
+        dead = true
+        try {
+            stdin.write("exit\n")
+            stdin.flush()
+        } catch (_: IOException) {
+        }
+        try {
+            stdin.close()
+        } catch (_: IOException) {
+        }
+        process.destroy()
+    }
+
+    companion object {
+        /** Put in a queue when its stream reaches end of file */
+        private val EOF = Any()
+
+        /** Starts [command] (e.g. su). Returns null if the binary can't be executed. */
+        fun start(command: List<String>): ShellSession? = try {
+            ShellSession(ProcessBuilder(command).start())
+        } catch (e: IOException) {
             null
         }
-    }
 
-    /**
-     * Executes a shell command as root and returns its output.
-     *
-     * Example usage:
-     *   val result = RootUtils.executeSuCommand("ls /data/local/tmp")
-     *   // result might be "frida-server\n"
-     *
-     * @param command The shell command to execute as root
-     * @return The command's stdout output as a String, or empty string on failure
-     */
-    fun executeSuCommand(command: String): String {
-        // Safety check: don't even try if root is not available
-        if (!isRootAvailable()) return ""
-
-        // Get (or create) the persistent su process
-        val suPair = getSuProcess() ?: return ""
-        val (process, outputStream) = suPair
-
-        return try {
-            // Write the command followed by a newline (like pressing Enter in a terminal)
-            outputStream.write("$command\n".toByteArray())
-            outputStream.flush() // Make sure the data is actually sent
-
-            // Wait a bit for the command to execute
-            // This is a simple approach — more advanced apps use markers instead
-            Thread.sleep(500)
-
-            // Read whatever output is available from the process
-            val inputStream = process.inputStream
-            val available = inputStream.available()
-
-            // Allocate a buffer: use the actual available bytes, or 1024 as minimum
-            val buffer = ByteArray(if (available > 0) available else 1024)
-            val output = StringBuilder()
-
-            // Keep reading while there's data available
-            while (inputStream.available() > 0 && inputStream.read(buffer) != -1) {
-                output.append(String(buffer))
-            }
-
-            output.toString()
-        } catch (e: Exception) {
-            // Return empty string if anything goes wrong
-            ""
-        }
-    }
-
-    /**
-     * Closes the persistent su process and releases resources.
-     *
-     * Should be called when the app is closing (e.g., in ViewModel.onCleared())
-     * to avoid leaving orphaned root processes running in the background.
-     */
-    fun closeSuProcess() {
-        try {
-            suOutputStream?.let {
-                // Send "exit" command to cleanly close the shell
-                it.write("exit\n".toByteArray())
-                it.flush()
-                it.close()
-            }
-            // Force-terminate the process as a fallback
-            suProcess?.destroy()
-        } catch (e: Exception) {
-            // Ignore errors during cleanup
-        } finally {
-            // Always clear the references so the next call creates a fresh process
-            suProcess = null
-            suOutputStream = null
+        private fun startReader(stream: InputStream, queue: LinkedBlockingQueue<Any>, name: String) {
+            val reader = Thread({
+                try {
+                    BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { lines ->
+                        while (true) {
+                            val line = lines.readLine() ?: break
+                            queue.put(line)
+                        }
+                    }
+                } catch (_: IOException) {
+                } finally {
+                    queue.put(EOF)
+                }
+            }, name)
+            reader.isDaemon = true
+            reader.start()
         }
     }
 }

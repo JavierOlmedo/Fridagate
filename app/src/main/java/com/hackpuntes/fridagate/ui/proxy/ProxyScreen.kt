@@ -58,6 +58,7 @@ fun ProxyScreen() {
     val isIptablesEnabled by viewModel.isIptablesEnabled.collectAsState()
     val isSystemProxyEnabled by viewModel.isSystemProxyEnabled.collectAsState()
     val isBurpReachable by viewModel.isBurpReachable.collectAsState()
+    val isCertInstalled by viewModel.isCertInstalled.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val logs by viewModel.logs.collectAsState()
 
@@ -94,6 +95,7 @@ fun ProxyScreen() {
 
             // ── Section: Certificate ──────────────────────────────────────────
             CertificateCard(
+                isCertInstalled = isCertInstalled,
                 isLoading = isLoading,
                 onInstallCert = { viewModel.installBurpCertificate() }
             )
@@ -241,7 +243,9 @@ private fun ProxyMethodsCard(
             // iptables switch — recommended method, captures all apps
             ProxyToggleRow(
                 title = "iptables Transparent Proxy",
-                subtitle = "Redirects ALL traffic (recommended, requires root)",
+                subtitle = "Redirects TCP 80/443 of every app (recommended, requires root). " +
+                        "Enable 'Support invisible proxying' on the Burp listener. " +
+                        "QUIC and IPv6 web traffic are blocked so apps fall back to TCP over IPv4.",
                 checked = isIptablesEnabled,
                 enabled = !isLoading,
                 onCheckedChange = onToggleIptables
@@ -297,10 +301,14 @@ private fun ProxyToggleRow(
 
 /**
  * Card for installing Burp's CA certificate.
- * Explains why it's needed so the user understands what they're doing.
+ * Explains why it's needed so the user understands what they're doing,
+ * and shows whether the CA Burp is serving now is trusted by the system.
+ *
+ * @param isCertInstalled true / false, or null when Burp can't be reached to check
  */
 @Composable
 private fun CertificateCard(
+    isCertInstalled: Boolean?,
     isLoading: Boolean,
     onInstallCert: () -> Unit
 ) {
@@ -315,11 +323,18 @@ private fun CertificateCard(
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "Install Burp's CA certificate to intercept HTTPS traffic. " +
-                        "Requires root and an active system proxy.",
+                text = "Adds Burp's CA to the system trust store to intercept HTTPS (Android 7 to 14+, " +
+                        "requires root). It lives in memory: install it again after every reboot, " +
+                        "and restart target apps after installing.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            val (certText, certColor) = when (isCertInstalled) {
+                null  -> "Unknown (Burp unreachable)" to Color.Gray
+                true  -> "● Trusted by the system" to Color(0xFF4CAF50)
+                false -> "● Not installed" to Color(0xFFF44336)
+            }
+            Text(text = certText, color = certColor, fontWeight = FontWeight.Medium)
             Button(
                 onClick = onInstallCert,
                 modifier = Modifier.fillMaxWidth(),

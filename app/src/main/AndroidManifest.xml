@@ -9,8 +9,12 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
+    <!-- usesCleartextTraffic: Burp serves its CA over plain HTTP (http://<burp-ip>:<port>/cert).
+         Since Android 9 cleartext is blocked by default and the CA download would fail.
+         Everything else (GitHub API and downloads) uses HTTPS. -->
     <application
         android:allowBackup="true"
+        android:usesCleartextTraffic="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

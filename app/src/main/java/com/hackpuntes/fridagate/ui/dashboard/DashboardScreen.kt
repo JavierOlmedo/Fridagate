@@ -160,9 +160,14 @@ class DashboardViewModel(context: Context) : ViewModel() {
             val httpsPort = prefs.burpHttpsPort.first()
 
             addLog("Enabling iptables proxy → $ip:$httpPort...")
-            val proxyEnabled = ProxyUtils.enableIptablesProxy(ip, httpPort, httpsPort)
-            _isProxyActive.value = proxyEnabled
-            if (proxyEnabled) addLog("iptables proxy enabled") else addLog("ERROR: Failed to enable proxy")
+            val proxyResult = ProxyUtils.enableIptablesProxy(ip, httpPort, httpsPort)
+            _isProxyActive.value = proxyResult.success
+            if (proxyResult.success) {
+                addLog("iptables proxy enabled")
+                if (proxyResult.message.isNotEmpty()) addLog("WARNING: ${proxyResult.message}")
+            } else {
+                addLog("ERROR: Failed to enable proxy — ${proxyResult.message}")
+            }
 
             // Step 3: Verify Burp is reachable
             addLog("Checking Burp Suite at $ip:$httpPort...")
@@ -201,9 +206,13 @@ class DashboardViewModel(context: Context) : ViewModel() {
 
             // Step 2: Disable iptables proxy
             addLog("Disabling iptables proxy...")
-            val disabled = ProxyUtils.disableIptablesProxy()
-            _isProxyActive.value = !disabled
-            if (disabled) addLog("iptables proxy disabled") else addLog("ERROR: Failed to disable proxy")
+            val disableResult = ProxyUtils.disableIptablesProxy()
+            _isProxyActive.value = !disableResult.success
+            if (disableResult.success) {
+                addLog("iptables proxy disabled")
+            } else {
+                addLog("ERROR: Failed to disable proxy — ${disableResult.message}")
+            }
 
             // Step 3: Clear system proxy (http_proxy + global_http_proxy)
             // Without this, the proxy setting persists across reboots and the WiFi shows "no internet"

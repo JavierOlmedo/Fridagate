@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hackpuntes.fridagate.data.AppPreferences
+import com.hackpuntes.fridagate.utils.InputValidator
 import com.hackpuntes.fridagate.utils.ProxyUtils
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,7 +20,7 @@ import kotlinx.coroutines.launch
  *  - Enable/disable the iptables transparent proxy
  *  - Enable/disable the system-level HTTP proxy
  *  - Test connectivity to Burp Suite
- *  - Trigger Burp CA certificate installation
+ *  - Install Burp's CA certificate and show whether the system trusts it
  *  - Maintain a log of operations shown in the UI
  *
  * @param context Needed to instantiate AppPreferences (which needs Context for DataStore)
@@ -42,11 +43,11 @@ class ProxyViewModel(context: Context) : ViewModel() {
     private val _burpIp = MutableStateFlow(AppPreferences.DEFAULT_BURP_IP)
     val burpIp: StateFlow<String> = _burpIp.asStateFlow()
 
-    /** The HTTP proxy port (typically 8080) */
+    /** Burp listener port that receives redirected HTTP (port 80) traffic */
     private val _httpPort = MutableStateFlow(AppPreferences.DEFAULT_HTTP_PORT)
     val httpPort: StateFlow<Int> = _httpPort.asStateFlow()
 
-    /** The HTTPS proxy port (typically 8443) */
+    /** Burp listener port that receives redirected HTTPS (port 443) traffic */
     private val _httpsPort = MutableStateFlow(AppPreferences.DEFAULT_HTTPS_PORT)
     val httpsPort: StateFlow<Int> = _httpsPort.asStateFlow()
 
@@ -69,6 +70,13 @@ class ProxyViewModel(context: Context) : ViewModel() {
     private val _isBurpReachable = MutableStateFlow<Boolean?>(null)
     val isBurpReachable: StateFlow<Boolean?> = _isBurpReachable.asStateFlow()
 
+    /**
+     * Whether the CA that Burp is serving right now is trusted by the system.
+     * null = unknown (Burp not reachable, so its current CA can't be fetched)
+     */
+    private val _isCertInstalled = MutableStateFlow<Boolean?>(null)
+    val isCertInstalled: StateFlow<Boolean?> = _isCertInstalled.asStateFlow()
+
     /** Whether a background operation is running (shows loading indicator) */
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -82,10 +90,11 @@ class ProxyViewModel(context: Context) : ViewModel() {
     // -------------------------------------------------------------------------
 
     init {
-        // Load saved settings from DataStore when the ViewModel is created
-        loadSavedSettings()
-        // Check the current proxy status (iptables rules may already be active)
-        checkProxyStatus()
+        // In order: the status checks need the saved Burp address, not the default one
+        viewModelScope.launch {
+            loadSavedSettings()
+            refreshStatus()
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -98,14 +107,11 @@ class ProxyViewModel(context: Context) : ViewModel() {
      * .first() collects only the first emission from a Flow and then cancels.
      * This is the idiomatic way to do a one-shot read from DataStore.
      */
-    private fun loadSavedSettings() {
-        viewModelScope.launch {
-            // Read each setting once and update the corresponding StateFlow
-            _burpIp.value = prefs.burpIp.first()
-            _httpPort.value = prefs.burpHttpPort.first()
-            _httpsPort.value = prefs.burpHttpsPort.first()
-            addLog("Settings loaded — Burp: ${_burpIp.value}:${_httpPort.value}")
-        }
+    private suspend fun loadSavedSettings() {
+        _burpIp.value = prefs.burpIp.first()
+        _httpPort.value = prefs.burpHttpPort.first()
+        _httpsPort.value = prefs.burpHttpsPort.first()
+        addLog("Settings loaded — Burp: ${_burpIp.value}:${_httpPort.value}")
     }
 
     /**
@@ -152,62 +158,76 @@ class ProxyViewModel(context: Context) : ViewModel() {
     // -------------------------------------------------------------------------
 
     /**
-     * Checks the current state of both proxy methods.
-     * Called on init and when the user taps Refresh.
+     * Checks the current state of both proxy methods and of the CA certificate.
+     * Called when the user taps Refresh.
      */
     fun checkProxyStatus() {
-        viewModelScope.launch {
-            _isLoading.value = true
+        viewModelScope.launch { refreshStatus() }
+    }
 
-            // Check iptables rules
-            val iptablesActive = ProxyUtils.isIptablesProxyEnabled()
-            _isIptablesEnabled.value = iptablesActive
+    private suspend fun refreshStatus() {
+        _isLoading.value = true
 
-            // Check system proxy
-            val systemProxy = ProxyUtils.getSystemProxy()
-            _isSystemProxyEnabled.value = systemProxy != null
+        // Check iptables rules
+        val iptablesActive = ProxyUtils.isIptablesProxyEnabled()
+        _isIptablesEnabled.value = iptablesActive
 
-            addLog("Proxy status — iptables: $iptablesActive, system: ${systemProxy ?: "none"}")
-            _isLoading.value = false
+        // Check system proxy
+        val systemProxy = ProxyUtils.getSystemProxy()
+        _isSystemProxyEnabled.value = systemProxy != null
+
+        // Check whether the system trusts the CA Burp is serving now
+        val certInstalled = ProxyUtils.isBurpCertInstalled(_burpIp.value, _httpPort.value)
+        _isCertInstalled.value = certInstalled
+
+        val certText = when (certInstalled) {
+            true -> "trusted"
+            false -> "not installed"
+            null -> "unknown (Burp unreachable)"
         }
+        addLog("Proxy status — iptables: $iptablesActive, system: ${systemProxy ?: "none"}, CA: $certText")
+        _isLoading.value = false
     }
 
     /**
      * Toggles the iptables transparent proxy on or off.
      *
-     * If enabling: applies DNAT rules to redirect ports 80 and 443 to Burp.
-     * If disabling: flushes the NAT OUTPUT and POSTROUTING chains.
+     * If enabling: redirects TCP 80/443 to Burp and blocks QUIC / IPv6 web traffic.
+     * If disabling: removes Fridagate's own chains, leaving other rules untouched.
      *
      * @param enable true to enable, false to disable
      */
     fun toggleIptablesProxy(enable: Boolean) {
+        if (enable && !validateBurpSettings()) return
         viewModelScope.launch {
             _isLoading.value = true
 
             if (enable) {
                 addLog("Enabling iptables proxy → ${_burpIp.value}:${_httpPort.value}/${_httpsPort.value}...")
-                val success = ProxyUtils.enableIptablesProxy(
+                val result = ProxyUtils.enableIptablesProxy(
                     burpIp = _burpIp.value,
                     httpPort = _httpPort.value,
                     httpsPort = _httpsPort.value
                 )
-                _isIptablesEnabled.value = success
-                if (success) {
-                    addLog("iptables proxy enabled — all HTTP/HTTPS traffic redirected to Burp")
+                if (result.success) {
+                    addLog("iptables proxy enabled — TCP 80/443 of every app goes to Burp")
+                    addLog("Burp listener must have 'Support invisible proxying' enabled")
+                    if (result.message.isNotEmpty()) addLog("WARNING: ${result.message}")
                 } else {
-                    addLog("ERROR: Failed to enable iptables proxy — check root access")
+                    addLog("ERROR: ${result.message}")
                 }
             } else {
                 addLog("Disabling iptables proxy...")
-                val success = ProxyUtils.disableIptablesProxy()
-                _isIptablesEnabled.value = !success
-                if (success) {
+                val result = ProxyUtils.disableIptablesProxy()
+                if (result.success) {
                     addLog("iptables proxy disabled — traffic flows normally")
                 } else {
-                    addLog("ERROR: Failed to disable iptables proxy")
+                    addLog("ERROR: ${result.message}")
                 }
             }
 
+            // Show what is really active, whatever the outcome
+            _isIptablesEnabled.value = ProxyUtils.isIptablesProxyEnabled()
             _isLoading.value = false
         }
     }
@@ -218,13 +238,13 @@ class ProxyViewModel(context: Context) : ViewModel() {
      * @param enable true to set the system proxy, false to clear it
      */
     fun toggleSystemProxy(enable: Boolean) {
+        if (enable && !validateBurpSettings()) return
         viewModelScope.launch {
             _isLoading.value = true
 
             if (enable) {
                 addLog("Setting system proxy → ${_burpIp.value}:${_httpPort.value}...")
                 val success = ProxyUtils.setSystemProxy(_burpIp.value, _httpPort.value)
-                _isSystemProxyEnabled.value = success
                 if (success) {
                     addLog("System proxy set — apps that respect proxy will use Burp")
                 } else {
@@ -233,7 +253,6 @@ class ProxyViewModel(context: Context) : ViewModel() {
             } else {
                 addLog("Clearing system proxy...")
                 val success = ProxyUtils.clearSystemProxy()
-                _isSystemProxyEnabled.value = !success
                 if (success) {
                     addLog("System proxy cleared")
                 } else {
@@ -241,6 +260,7 @@ class ProxyViewModel(context: Context) : ViewModel() {
                 }
             }
 
+            _isSystemProxyEnabled.value = ProxyUtils.getSystemProxy() != null
             _isLoading.value = false
         }
     }
@@ -269,24 +289,26 @@ class ProxyViewModel(context: Context) : ViewModel() {
     }
 
     /**
-     * Downloads and installs Burp's CA certificate into the Android system trust store.
-     * After installation, a reboot may be required for all apps to recognize the certificate.
+     * Downloads Burp's CA certificate and adds it to the Android system trust store.
+     * The certificate lives in memory: it must be installed again after a reboot.
      */
     fun installBurpCertificate() {
+        if (!validateBurpSettings()) return
         viewModelScope.launch {
             _isLoading.value = true
-            addLog("Downloading Burp CA certificate from http://${_burpIp.value}:${_httpPort.value}/cert...")
+            addLog("Installing Burp CA from http://${_burpIp.value}:${_httpPort.value}/cert...")
 
-            val installed = ProxyUtils.installBurpCertificate(_burpIp.value, _httpPort.value)
+            val result = ProxyUtils.installBurpCertificate(_burpIp.value, _httpPort.value)
 
-            if (installed) {
-                addLog("Burp CA certificate installed successfully")
-                addLog("A reboot may be required for all apps to trust the certificate")
+            if (result.success) {
+                addLog(result.message)
+                addLog("Restart target apps so they load the new CA")
+                addLog("Not persistent: install it again after every reboot")
             } else {
-                addLog("ERROR: Certificate installation failed")
-                addLog("Make sure Burp proxy is running and system proxy is active")
+                addLog("ERROR: ${result.message}")
             }
 
+            _isCertInstalled.value = ProxyUtils.isBurpCertInstalled(_burpIp.value, _httpPort.value)
             _isLoading.value = false
         }
     }
@@ -300,6 +322,19 @@ class ProxyViewModel(context: Context) : ViewModel() {
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
+
+    /** Logs an error and returns false if the Burp IP or ports are not usable */
+    private fun validateBurpSettings(): Boolean {
+        if (!InputValidator.isValidIpv4(_burpIp.value)) {
+            addLog("ERROR: '${_burpIp.value}' is not a valid IPv4 address")
+            return false
+        }
+        if (!InputValidator.isValidPort(_httpPort.value) || !InputValidator.isValidPort(_httpsPort.value)) {
+            addLog("ERROR: Ports must be between 1 and 65535")
+            return false
+        }
+        return true
+    }
 
     /** Appends a timestamped message to the log list */
     private fun addLog(message: String) {
