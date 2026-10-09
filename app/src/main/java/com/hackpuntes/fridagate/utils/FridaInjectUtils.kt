@@ -104,10 +104,10 @@ object FridaInjectUtils {
         try {
             // Step 1: save scripts and build the path to pass to frida-inject
             val scriptPath = if (scripts.size == 1) {
-                val deploy = ScriptUtils.saveScriptToDevice(context, scripts.first())
+                val path = ScriptUtils.saveScriptToDevice(context, scripts.first())
                     ?: return@withContext listOf("ERROR: Could not save script — check root access")
-                lines += "Saved ${scripts.first().fileName} → ${deploy.tmpPath}"
-                deploy.tmpPath
+                lines += "Saved ${scripts.first().fileName} → $path"
+                path
             } else {
                 // Multiple scripts: concatenate into one temp file
                 val combined = buildString {
