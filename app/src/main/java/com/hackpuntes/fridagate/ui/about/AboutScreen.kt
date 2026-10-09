@@ -4,9 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.net.Uri
 import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.Image
@@ -33,6 +31,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.createBitmap
+import androidx.core.net.toUri
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hackpuntes.fridagate.BuildConfig
 import com.hackpuntes.fridagate.R
@@ -56,7 +56,7 @@ fun AboutScreen(viewModel: AboutViewModel = viewModel()) {
      * Intent.ACTION_VIEW with a Uri is the standard Android way to open a URL.
      */
     val openUrl: (String) -> Unit = { url ->
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        val intent = Intent(Intent.ACTION_VIEW, url.toUri())
         context.startActivity(intent)
     }
 
@@ -78,7 +78,7 @@ fun AboutScreen(viewModel: AboutViewModel = viewModel()) {
         // then draw it manually onto a Bitmap via Canvas.
         val iconBitmap = remember {
             val drawable = ContextCompat.getDrawable(context, R.mipmap.ic_launcher)
-            val bmp = Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888)
+            val bmp = createBitmap(192, 192)
             val canvas = Canvas(bmp)
             drawable?.setBounds(0, 0, canvas.width, canvas.height)
             drawable?.draw(canvas)
