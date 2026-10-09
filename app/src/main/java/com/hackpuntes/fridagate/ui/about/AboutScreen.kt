@@ -25,6 +25,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.hackpuntes.fridagate.BuildConfig
 import com.hackpuntes.fridagate.R
 
 /**
@@ -89,7 +90,8 @@ fun AboutScreen() {
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "Version 1.0.3",
+            // Comes from appVersion in gradle.properties, nothing to edit here
+            text = "Version ${BuildConfig.VERSION_NAME}",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

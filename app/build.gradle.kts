@@ -3,6 +3,18 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// The version is defined once, as appVersion in gradle.properties.
+// versionCode is derived from it (MAJOR * 10000 + MINOR * 100 + PATCH), so 1.0.4 -> 10004
+// and it always grows when the version does.
+val appVersion: String = providers.gradleProperty("appVersion").get()
+val appVersionCode: Int = run {
+    val parts = appVersion.split(".").map { it.toIntOrNull() }
+    require(parts.size == 3 && parts.all { it != null && it >= 0 } && parts[1]!! < 100 && parts[2]!! < 100) {
+        "appVersion must look like 1.2.3 (minor and patch below 100), got '$appVersion'"
+    }
+    parts[0]!! * 10_000 + parts[1]!! * 100 + parts[2]!!
+}
+
 android {
     namespace = "com.hackpuntes.fridagate"
     compileSdk {
@@ -15,8 +27,8 @@ android {
         applicationId = "com.hackpuntes.fridagate"
         minSdk = 24
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.3"
+        versionCode = appVersionCode
+        versionName = appVersion
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -36,6 +48,8 @@ android {
     }
     buildFeatures {
         compose = true
+        // BuildConfig.VERSION_NAME is shown in the About screen
+        buildConfig = true
     }
 }
 

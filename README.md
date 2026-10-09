@@ -4,7 +4,7 @@
   <img src="assets/fridagate-banner.png" alt="Fridagate Banner" width="100%"/>
   <p>Android pentesting toolkit - Frida server manager + Burp Suite proxy interceptor</p>
 
-  ![Version](https://img.shields.io/badge/version-1.0.3-brightgreen)
+  ![Version](https://img.shields.io/github/v/release/JavierOlmedo/Fridagate?label=version&color=brightgreen)
   ![Platform](https://img.shields.io/badge/platform-Android-green)
   ![Min SDK](https://img.shields.io/badge/minSDK-24-blue)
   ![License](https://img.shields.io/badge/license-MIT-orange)
