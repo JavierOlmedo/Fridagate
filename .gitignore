@@ -7,6 +7,8 @@ captures/
 *.aab
 *.apk
 output-metadata.json
+# Output folder of Android Studio's "Generate Signed App Bundle / APK" (APK, baseline profiles)
+/app/release/
 
 # --- Local Configuration (Sensitive/Machine-specific) ---
 local.properties
