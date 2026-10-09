@@ -12,14 +12,25 @@ import java.io.IOException
 /**
  * Runs the generated iptables scripts against the machine's real iptables, inside a
  * throwaway network namespace (unshare -n): the host's own rules are never touched.
- * Needs Linux, root, unshare and iptables with the nat/owner/REJECT extensions;
- * skipped otherwise (e.g. on a normal developer machine).
+ * Needs Linux, root (or passwordless sudo on CI), unshare and iptables with the
+ * nat/owner/REJECT extensions; skipped otherwise (e.g. on a normal developer machine).
  */
 class IptablesNetnsTest {
+
+    /** How to become root: nothing when already root, sudo -n on CI, null when neither works */
+    private val rootPrefix: List<String>? by lazy {
+        when {
+            runQuietly(listOf("id", "-u")).trim() == "0" -> emptyList()
+            System.getenv("CI") == "true" && runQuietly(listOf("sudo", "-n", "true"), exitCode = true) == "0" ->
+                listOf("sudo", "-n")
+            else -> null
+        }
+    }
 
     @Before
     fun requireIsolatedIptables() {
         assumeTrue(File("/bin/sh").canExecute())
+        assumeTrue("needs root or passwordless sudo on CI", rootPrefix != null)
         val probe = """
             set -e
             iptables -w -t nat -N PROBE
@@ -116,11 +127,22 @@ class IptablesNetnsTest {
     private fun sh(script: String) = "sh -c ${ShellUtils.quote(script)}"
 
     private fun runIsolated(script: String): Pair<Int, String> = try {
-        val process = ProcessBuilder("unshare", "-n", "/bin/sh", "-c", script).redirectErrorStream(true).start()
+        val command = rootPrefix.orEmpty() + listOf("unshare", "-n", "/bin/sh", "-c", script)
+        val process = ProcessBuilder(command).redirectErrorStream(true).start()
         val output = process.inputStream.readBytes().toString(Charsets.UTF_8)
         process.waitFor() to output
     } catch (e: IOException) {
         -1 to e.toString()
+    }
+
+    /** Output of [command], or its exit code when [exitCode] is true. "" if it can't run. */
+    private fun runQuietly(command: List<String>, exitCode: Boolean = false): String = try {
+        val process = ProcessBuilder(command).redirectErrorStream(true).start()
+        val output = process.inputStream.readBytes().toString(Charsets.UTF_8)
+        val code = process.waitFor()
+        if (exitCode) code.toString() else output
+    } catch (e: IOException) {
+        ""
     }
 
     private fun runIsolatedOrFail(script: String): String {

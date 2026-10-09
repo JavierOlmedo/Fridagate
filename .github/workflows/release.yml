@@ -1,0 +1,80 @@
+name: Release APK
+
+# When a release is published on GitHub, build the signed APK and attach it as fridagate.apk.
+#
+# Needs two repository secrets (Settings > Secrets and variables > Actions):
+#   FRIDAGATE_KEYSTORE_BASE64    the release keystore encoded in base64
+#   FRIDAGATE_KEYSTORE_PASSWORD  its password (the key uses the same one)
+# Without them the workflow only warns, and the APK has to be attached by hand.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    name: Build, sign and attach the APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Check that the tag matches appVersion
+        run: |
+          version=$(grep '^appVersion=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Release tag $TAG does not match appVersion=$version in gradle.properties. Run bumpPatch, push, and publish the release again."
+            exit 1
+          fi
+
+      - name: Check the signing secrets
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FRIDAGATE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::Signing secrets are not configured, so no APK was attached. Build it with 'Generate Signed App Bundle / APK' and upload it to the release."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v5
+        if: steps.signing.outputs.configured == 'true'
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v5
+        if: steps.signing.outputs.configured == 'true'
+
+      - name: Build the signed release APK
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FRIDAGATE_KEYSTORE_BASE64 }}
+          FRIDAGATE_KEYSTORE_PASSWORD: ${{ secrets.FRIDAGATE_KEYSTORE_PASSWORD }}
+        run: |
+          export FRIDAGATE_KEYSTORE="$RUNNER_TEMP/release.jks"
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$FRIDAGATE_KEYSTORE"
+          ./gradlew assembleRelease
+          rm -f "$FRIDAGATE_KEYSTORE"
+          cp app/build/outputs/apk/release/app-release.apk fridagate.apk
+
+      - name: Show the APK checksum and signing certificate
+        if: steps.signing.outputs.configured == 'true'
+        run: |
+          sha256sum fridagate.apk
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$apksigner" verify --print-certs fridagate.apk
+
+      - name: Attach the APK to the release
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" fridagate.apk --clobber

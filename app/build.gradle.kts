@@ -33,8 +33,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Signing for the GitHub release workflow, which sets FRIDAGATE_KEYSTORE.
+    // Local builds keep using Android Studio's "Generate Signed App Bundle / APK" wizard.
+    val ciKeystore = providers.environmentVariable("FRIDAGATE_KEYSTORE").orNull
+    if (ciKeystore != null) {
+        signingConfigs {
+            create("ci") {
+                storeFile = file(ciKeystore)
+                storePassword = providers.environmentVariable("FRIDAGATE_KEYSTORE_PASSWORD").orNull
+                keyAlias = providers.environmentVariable("FRIDAGATE_KEY_ALIAS").orNull ?: "fridagate"
+                keyPassword = providers.environmentVariable("FRIDAGATE_KEY_PASSWORD").orNull ?: storePassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (ciKeystore != null) signingConfig = signingConfigs.getByName("ci")
             // R8 removes unused code and resources (most Material icons) and optimizes the rest.
             // Classes read by reflection are kept in proguard-rules.pro.
             isMinifyEnabled = true
